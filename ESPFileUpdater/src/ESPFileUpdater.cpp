@@ -206,7 +206,6 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::isRemoteFileNewer(const String& loc
 
     if (verbose) Serial.printf("[ESPFileUpdater: %s] [Local SHA256] %s\n", localPath.c_str(), localHash.c_str());
     if (verbose) Serial.printf("[ESPFileUpdater: %s] [Remote SHA256] %s\n", localPath.c_str(), remoteHash.c_str());
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Check] Hashes do not match. Assume remote file is newer.\n", localPath.c_str());
 
     if (localHash != remoteHash) {
       return UPDATED;
