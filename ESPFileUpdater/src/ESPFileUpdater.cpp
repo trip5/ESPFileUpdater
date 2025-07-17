@@ -153,6 +153,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
   if (_fs.exists(localPath)) _fs.remove(localPath);
   _fs.rename(tmpPath, localPath);
 
+  if (maxAge.length() == 0 || maxAge == "") return UPDATED;
   if (newHash == "") {
     File localFile = _fs.open(localPath, FILE_READ);
     newHash = calculateFileHash(localFile);
@@ -441,6 +442,8 @@ bool ESPFileUpdater::waitForSystemReadyFS() {
   return false;
 }
 
+/// @brief Wait until the system time is ready.
+/// @return true if ready, false if timeout.
 bool ESPFileUpdater::waitForSystemReadyTime() {
   const uint32_t timeoutMs = ESPFILEUPDATER_TIMEOUT;
   uint32_t start = millis();
@@ -454,6 +457,8 @@ bool ESPFileUpdater::waitForSystemReadyTime() {
   return true;
 }
 
+/// @brief Wait until the network is ready.
+/// @return true if ready, false if timeout.
 bool ESPFileUpdater::waitForSystemReadyNetwork() {
   const uint32_t timeoutMs = ESPFILEUPDATER_TIMEOUT;
   uint32_t start = millis();

@@ -90,7 +90,8 @@ void loop() {
 
 `maxAge`: can accept `X hours`, `X days`, `X weeks`, `X months` as an argument.
 If the file does not exist or `maxAge` is not specified, it will download/update immediately, without any checks.
-You may use abbreviations like `hr` or `h` or `d` or `wk` or `w` or `mo` or `m`, with or without spaces, with or without s.
+If `maxAge` is not specified or is empty, then file information will not be saved to a .meta file (it simply downloads the file).
+You may use abbreviations like `hr` or `h` or `d` or `wk` or `w` or `mo` or `m`, with or without spaces, with or without `s`.
 Although the process can be called often, it will not update if the accompanying .meta file has a date-stamp within that window of time.
 Be reasonable. Don't check for updates too frequently.
 If you need to update often, specify `0d` to at least check if the remote file is updated.
