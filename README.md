@@ -85,7 +85,7 @@ void loop() {
 
 `/local/file` : path and file on the file system - probably best to start with root `/`.
 
-`https://remote/file` : be sure this is a file that doesn't do a re-direct - see the FreeRTOS_Task example for a Github retrieval.
+`https://remote/file` : try to use a URL that doesn't do a re-direct - see the FreeRTOS_Task example for a Github retrieval.
 
 ### Options
 
