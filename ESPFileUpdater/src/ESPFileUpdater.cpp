@@ -81,6 +81,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
 
     HTTPClient http;
     http.begin(remoteURL);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     http.setUserAgent(ESPFILEUPDATER_USERAGENT);
     int httpCode = http.sendRequest("HEAD");
 
@@ -121,6 +122,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
 
   HTTPClient http;
   http.begin(remoteURL);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   http.setUserAgent(ESPFILEUPDATER_USERAGENT);
   int getCode = http.GET();
   if (getCode != HTTP_CODE_OK) {
@@ -187,6 +189,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::isRemoteFileNewer(const String& loc
 
     HTTPClient http;
     http.begin(url);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     http.setUserAgent(ESPFILEUPDATER_USERAGENT);
     int code = http.GET();
     if (code == HTTP_CODE_NOT_FOUND) {

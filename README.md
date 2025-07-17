@@ -10,6 +10,7 @@ The ESPFileUpdater library provides functionality for checking and updating file
 - Support for max age checks to prevent unnecessary updates
 - Will download even if local file missing
 - Compatible with SPIFFS (tested) and LittleFS (untested)
+- Follows 3xx redirects
 
 ### Installation
 To install the ESPFileUpdater library, follow these steps:
@@ -19,7 +20,7 @@ To install the ESPFileUpdater library, follow these steps:
 
 ### Dependent on Internet, File System, and System Time
 - It depends on an Internet connection, file system, and system time.
-- Only run it after the these 3 process are stable.
+- Only run it after the these 3 process are stable (usually).
 - If system time is not available at the time it runs, it will download the file only if it does not already exist on the file system.
 
 ---
