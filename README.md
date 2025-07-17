@@ -110,6 +110,8 @@ You may specify these options in any order, one, both, or not at all.
   - If file does not exist $$\color{lightgreen}[update]$$
     - This initial file may get 1970-01-01 as timestamp in .meta file if system time is incorrect
   - If maxAge not specified $$\color{lightgreen}[update]$$
+    - No .meta file is checked, created, or written (if one exists, it will remain)
+  - If maxAge is "0" $$\color{lightgreen}[update]$$
     - This initial file may get 1970-01-01 as timestamp in .meta file if system time is incorrect
 - Waits for system time to be correct
     - If not ready $$\color{red}[stop]$$

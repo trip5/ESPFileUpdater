@@ -34,7 +34,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
   if (!_fs.exists(localPath)) {
     if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] File doesn't exist. Forcing download.\n", localPath.c_str());
     ForceUpdate = true;
-  } else if (maxAge == "") {
+  } else if (maxAge == "" || maxAge == "0") {
     if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] Downloading.\n", localPath.c_str());
     ForceUpdate = true;
   } else {
