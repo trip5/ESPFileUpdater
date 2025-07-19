@@ -182,6 +182,11 @@ updater doesn't block your other operations.  15 seconds is excessive I'm sure b
 
 If your program doesn't use WiFi, you can use this macro to change how to check for a `true` condition on network readiness.
 
+- `#define ESPFILEUPDATER_INSECURE`
+
+Enables insecure mode.  It will disable checking of secure certificates when using HTTPS connections. This may help lower memory use.
+
+
 ### UpdateStatus Enum
 - **UPDATED**: Indicates that the file was updated successfully.
 - **MAX_AGE_NOT_REACHED**: Indicates that the maximum age for updates has not been reached.

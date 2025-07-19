@@ -34,7 +34,8 @@ public:
     FILE_NOT_FOUND,       ///< Remote file not found (404).
     FS_ERROR,             ///< Filesystem error.
     TIME_ERROR,           ///< System time not set.
-    NETWORK_ERROR         ///< Network connection not ready.
+    NETWORK_ERROR,        ///< Network connection not ready.
+    CONNECTION_FAILED     ///< Library connection error
   };
 
   /// @brief Construct a new ESPFileUpdater object.

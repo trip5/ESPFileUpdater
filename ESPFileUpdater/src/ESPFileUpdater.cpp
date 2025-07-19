@@ -26,6 +26,10 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
   String newLastModified = "";
   String newHash = "";
 
+  #ifdef ESPFILEUPDATER_INSECURE
+    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] Insecure mode enabled: disable checking of secure certificates.\n", localPath.c_str());
+  #endif
+
   if (waitForSystemReadyFS()==false) {
     if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] File system not ready. Aborting update.\n", localPath.c_str());
     return FS_ERROR;
@@ -79,8 +83,16 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
       return NETWORK_ERROR;
     }
 
-    HTTPClient http;
-    http.begin(remoteURL);
+    #ifdef ESPFILEUPDATER_INSECURE // skip server cert validation
+      WiFiClientSecure client;
+      client.setInsecure();
+      HTTPClient http;
+      http.begin(client, remoteURL);
+    # else
+      HTTPClient http;
+      http.begin(remoteURL);
+    #endif
+
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     http.setUserAgent(ESPFILEUPDATER_USERAGENT);
     int httpCode = http.sendRequest("HEAD");
@@ -120,8 +132,16 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
     return NETWORK_ERROR;
   }
 
-  HTTPClient http;
-  http.begin(remoteURL);
+  #ifdef ESPFILEUPDATER_INSECURE // skip server cert validation
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+    http.begin(client, remoteURL);
+  # else
+    HTTPClient http;
+    http.begin(remoteURL);
+  #endif
+
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   http.setUserAgent(ESPFILEUPDATER_USERAGENT);
   int getCode = http.GET();
@@ -187,14 +207,27 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::isRemoteFileNewer(const String& loc
     // Fallback: hash both files or check GET status
     if (verbose) Serial.printf("[ESPFileUpdater: %s] [Fallback] No Last-Modified header or server ignored request. Trying GET for file hash...\n", localPath.c_str());
 
-    HTTPClient http;
-    http.begin(url);
+    #ifdef ESPFILEUPDATER_INSECURE // skip server cert validation
+      WiFiClientSecure client;
+      client.setInsecure();
+      HTTPClient http;
+      http.begin(client, url);
+    # else
+      HTTPClient http;
+      http.begin(url);
+    #endif
+
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     http.setUserAgent(ESPFILEUPDATER_USERAGENT);
     int code = http.GET();
     if (code == HTTP_CODE_NOT_FOUND) {
       http.end();
       return FILE_NOT_FOUND;
+    }
+    if (code == -1) {
+      http.end();
+      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Connection failed. Library error: %s\n", localPath.c_str(), http.errorToString(code).c_str());
+      return CONNECTION_FAILED;
     }
     if (code != HTTP_CODE_OK) {
       http.end();
