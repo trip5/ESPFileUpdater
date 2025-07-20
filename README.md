@@ -230,7 +230,7 @@ Check the `examples` folder for examples of how to use the ESPFileUpdater librar
 
 | Date       | Version | Release Notes   |
 | ---------- | ------- |---------------- |
-| 2025.07.20 | 1.1.0   | 
+| 2025.07.20 | 1.1.0   | Settings added  |
 | 2025.06.29 | 1.0.0   | First release   |
 
 ---
