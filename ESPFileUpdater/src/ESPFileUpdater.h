@@ -1,3 +1,5 @@
+// ESPFileUpdater 1.1.0 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
+
 #pragma once
 
 #include <Arduino.h>
@@ -5,26 +7,21 @@
 #include <FS.h>
 #include <mbedtls/sha256.h>
 #include <WiFiClient.h>
-
-#ifndef ESPFILEUPDATER_MAXSIZE
-#define ESPFILEUPDATER_MAXSIZE 102400  // 100 KB max stream size for hashing
-#endif
-
-#ifndef ESPFILEUPDATER_TIMEOUT
-#define ESPFILEUPDATER_TIMEOUT 15000   // 15000ms / 15s for timeout (for each check)
-#endif
-
-#ifndef ESPFILEUPDATER_CHECKNET
-#define ESPFILEUPDATER_CHECKNET WiFi.status() == WL_CONNECTED  // Check the network
-#endif
-
-#ifndef ESPFILEUPDATER_USERAGENT
-#define ESPFILEUPDATER_USERAGENT "ESPFileUpdater/1.0.0 (https://github.com/trip5/ESPFileUpdater)"
+#include <WiFi.h>
+#ifdef ETH
+  #include <ETH.h>
 #endif
 
 /// @brief Class for updating files on ESP devices from a remote HTTP source.
 class ESPFileUpdater {
 public:
+
+// new setters to override defaults at runtime
+  void setMaxSize(size_t bytes)       { _maxSize = bytes; }
+  void setTimeout(uint32_t ms)        { _timeout = ms; }
+  void setUserAgent(const String& ua) { _userAgent = ua; }
+  void setInsecure(bool insecure)     { _insecure = insecure; }
+
   /// @brief Status codes for update attempts.
   enum UpdateStatus {
     UPDATED,              ///< File was updated.
@@ -59,6 +56,12 @@ public:
 
 private:
   fs::FS& _fs;
+  size_t   _maxSize   = 102400;    // 100 KB max stream size for hashing
+  uint32_t _timeout   = 15000;     // 15000ms / 15s for timeout (for each check)
+  bool     _insecure  = false;     // insecure mode enabled
+                                   // the browser / agent to report to servers 
+  String   _userAgent = "ESPFileUpdater/1.0.0 (https://github.com/trip5/ESPFileUpdater)";
+
 
   /// @brief Wait until the filesystem is ready (SPIFFS mounted).
   /// @return true if ready, false if timeout.
@@ -66,6 +69,15 @@ private:
   /// @brief Wait until the system time is set.
   /// @return true if ready, false if timeout.
   bool waitForSystemReadyTime();
+  
+  static bool networkIsConnected() {
+    if (WiFi.isConnected()) return true;
+  #ifdef ETH
+    if (ETH.linkUp()) return true;
+  #endif
+    return false;
+  }
+
   /// @brief Wait until Network is connected (WL_CONNECTED).
   /// @return true if ready, false if timeout.
   bool waitForSystemReadyNetwork();

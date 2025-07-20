@@ -61,11 +61,12 @@ void setup() {
     Serial.println(" Time synchronized!");
 
     ESPFileUpdater updater(SPIFFS);
+    updater.setTimeout(5000);
     ESPFileUpdater::UpdateStatus status = updater.checkAndUpdate("/path/to/local/file.txt", "https://example.com/remote/File.txt", "7d", true);
 
-    if (result == ESPFileUpdater::UPDATED) {
+    if (status == ESPFileUpdater::UPDATED) {
         Serial.println("[ESPFileUpdater: File.txt] Update completed.");
-    } else if (result == ESPFileUpdater::NOT_MODIFIED||result == ESPFileUpdater::MAX_AGE_NOT_REACHED) {
+    } else if (status == ESPFileUpdater::NOT_MODIFIED || status == ESPFileUpdater::MAX_AGE_NOT_REACHED) {
         Serial.println("[ESPFileUpdater: File.txt] No update needed.");
     } else {
         Serial.println("[ESPFileUpdater: File.txt] Update failed.");
@@ -158,36 +159,45 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 - **ESPFileUpdater(fs::FS& fs)**: Constructor that initializes the updater with the specified file system.
 - **UpdateStatus checkAndUpdate(const String& localPath, const String& remoteURL, const String& maxAge)**: Checks if the remote file is newer and updates if necessary.
 
-### Macros
+### Settings
 
-These can be defined in your program.  Defaults are shown here.
+These can be changed.
 
-- `#define ESPFILEUPDATER_USERAGENT "ESPFileUpdater/1.0.0 (https://github.com/trip5/ESPFileUpdater)"`
-
-Some developers might like to know who / what program is fetching data from them.  Define this macro to replace the default.
-
-- `#define ESPFILEUPDATER_MAXSIZE 102400  // 100 KB max stream size for hashing`
-
-If the date comparison fails, the file will be streamed from the server (without downloading) and compared to the file on the system.
-This helps reduce how many bytes are needed to generate a hash for the comparison.
+`setMaxSize(size_t bytes);` If the date comparison fails, the file will be streamed from the server (without downloading) and compared to the file on the system. This helps reduce how many bytes are needed to generate a hash for the comparison.
 100KB seems a reasonable default but you can increase or decrease the number.
 
-- `#define ESPFILEUPDATER_TIMEOUT 15000   // 15000ms / 15s for timeout`
-
-You should always do your best to make sure the various components needed for this are ready but there are checks and timeouts as
-part of the routines to wait if they are ready.  If you have time-critical operations, check the FreeRTOS_Task folder so that the
+`setTimeout(uint32_t ms);` You should always do your best to make sure the various components needed for
+this are ready but there are checks and timeouts as part of the routines to wait if they are ready.
+If you have time-critical operations, check the FreeRTOS_Task folder so that the
 updater doesn't block your other operations.  15 seconds is excessive I'm sure but it's just in case.
 
-- `#define ESPFILEUPDATER_CHECKNET WiFi.status() == WL_CONNECTED  // Check the network`
+`setUserAgent(const String& ua);` Some developers might like to know who / what program is fetching data from them.
 
-If your program doesn't use WiFi, you can use this macro to change how to check for a `true` condition on network readiness.
+`setInsecure(bool insecure);` Enables insecure mode.  It will disable checking of secure certificates when using HTTPS connections. This may help lower memory use.  Actually, setting to `true` seems to make connections fail more often...
 
-- `#define ESPFILEUPDATER_INSECURE`
+#### Stack Allocation (with defaults)
 
-Enables insecure mode.  It will disable checking of secure certificates when using HTTPS connections. This may help lower memory use.
+```cpp
+  ESPFileUpdater updater(SPIFFS);
+  updater.setMaxSize(102400);      // 100 KB max stream size for hashing
+  updater.setTimeout(15000);       // 15000ms / 15s for timeout (for each check)
+  updater.setUserAgent("ESPFileUpdater/1.0.0 (https://github.com/trip5/ESPFileUpdater)");
+  updater.setInsecure(false);      // insecure mode enabled
+```
 
+#### Heap Allocation
+
+```cpp
+  ESPFileUpdater* updater = nullptr;
+  updater = new ESPFileUpdater(SPIFFS);
+  updater->setMaxSize(102400);
+  updater->setTimeout(15000);
+  updater->setUserAgent("ESPFileUpdater/1.0.0 (https://github.com/trip5/ESPFileUpdater)");
+  updater->setInsecure(false);
+```
 
 ### UpdateStatus Enum
+
 - **UPDATED**: Indicates that the file was updated successfully.
 - **MAX_AGE_NOT_REACHED**: Indicates that the maximum age for updates has not been reached.
 - **NOT_MODIFIED**: Indicates that the remote file has not been modified.
@@ -196,18 +206,22 @@ Enables insecure mode.  It will disable checking of secure certificates when usi
 - **FS_ERROR**: Indicates an error with the SPIFFS file system.
 - **TIME_ERROR**: Indicates that system time was not set.
 - **NETWORK_ERROR**: Indicates the network connect was not ready.
-
+- **CONNECTION_FAILED**: Indicates a connection error; error returned by the upstream library will be shown if verbose is on.
 ---
 
 ## SPIFFS Limitations
-Keep in mind file names (including path) must be 31 characters or less.  Because of this limitation and the fact this library adds
-extra extensions to the .meta and .tmp download files, the real usable file name length limit is 27 characters!
+
+Keep in mind file names (including path) must be 31 characters or less.
+Because of this limitation and the fact this library adds
+extra extensions to the .meta and .tmp download files,
+the real usable file name length limit is 27 characters!
 
 I'm not sure about LittleFS limitations.
 
 ---
 
 ## Examples
+
 Check the `examples` folder for examples of how to use the ESPFileUpdater library in your projects.
 
 ---
@@ -216,9 +230,11 @@ Check the `examples` folder for examples of how to use the ESPFileUpdater librar
 
 | Date       | Version | Release Notes   |
 | ---------- | ------- |---------------- |
+| 2025.07.20 | 1.1.0   | 
 | 2025.06.29 | 1.0.0   | First release   |
 
 ---
 
 ## License
+
 This library is released under the MIT License. See the LICENSE file for more details.

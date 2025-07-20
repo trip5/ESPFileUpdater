@@ -1,4 +1,4 @@
-// -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
+// ESPFileUpdater 1.1.0 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
 
 #include "ESPFileUpdater.h"
 #include <time.h>
@@ -15,8 +15,6 @@
 #define mbedtls_sha256_finish_ret mbedtls_sha256_finish
 #endif
 
-/// @brief Construct a new ESPFileUpdater object.
-/// @param fs Reference to the filesystem.
 ESPFileUpdater::ESPFileUpdater(fs::FS& fs) : _fs(fs) {}
 
 /// @copydoc ESPFileUpdater::checkAndUpdate(const String&, const String&, const String&, bool)
@@ -26,9 +24,9 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
   String newLastModified = "";
   String newHash = "";
 
-  #ifdef ESPFILEUPDATER_INSECURE
+  if(_insecure) {
     if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] Insecure mode enabled: disable checking of secure certificates.\n", localPath.c_str());
-  #endif
+  }
 
   if (waitForSystemReadyFS()==false) {
     if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] File system not ready. Aborting update.\n", localPath.c_str());
@@ -83,18 +81,18 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
       return NETWORK_ERROR;
     }
 
-    #ifdef ESPFILEUPDATER_INSECURE // skip server cert validation
-      WiFiClientSecure client;
-      client.setInsecure();
-      HTTPClient http;
-      http.begin(client, remoteURL);
-    # else
-      HTTPClient http;
+    WiFiClientSecure secureClient;  
+    HTTPClient http;            
+
+    if (_insecure) {
+      secureClient.setInsecure();
+      http.begin(secureClient, remoteURL);
+    } else {
       http.begin(remoteURL);
-    #endif
+    }
 
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    http.setUserAgent(ESPFILEUPDATER_USERAGENT);
+    http.setUserAgent(_userAgent);
     int httpCode = http.sendRequest("HEAD");
 
     if (httpCode <= 0) {
@@ -132,18 +130,18 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
     return NETWORK_ERROR;
   }
 
-  #ifdef ESPFILEUPDATER_INSECURE // skip server cert validation
-    WiFiClientSecure client;
-    client.setInsecure();
-    HTTPClient http;
-    http.begin(client, remoteURL);
-  # else
-    HTTPClient http;
+  WiFiClientSecure secureClient;  
+  HTTPClient http;            
+
+  if (_insecure) {
+    secureClient.setInsecure();
+    http.begin(secureClient, remoteURL);
+  } else {
     http.begin(remoteURL);
-  #endif
+  }
 
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.setUserAgent(ESPFILEUPDATER_USERAGENT);
+  http.setUserAgent(_userAgent);
   int getCode = http.GET();
   if (getCode != HTTP_CODE_OK) {
     if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] GET failed. HTTP code: %d. Aborting.\n", localPath.c_str(), getCode);
@@ -194,7 +192,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
 }
 
 /// @copydoc ESPFileUpdater::isRemoteFileNewer
-ESPFileUpdater::UpdateStatus ESPFileUpdater::isRemoteFileNewer(const String& localPath, const String& url,
+ESPFileUpdater::UpdateStatus ESPFileUpdater::isRemoteFileNewer(const String& localPath, const String& remoteURL,
                                                                const String& lastModified,
                                                                String& newLastModified,
                                                                String& remoteHash,
@@ -207,18 +205,18 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::isRemoteFileNewer(const String& loc
     // Fallback: hash both files or check GET status
     if (verbose) Serial.printf("[ESPFileUpdater: %s] [Fallback] No Last-Modified header or server ignored request. Trying GET for file hash...\n", localPath.c_str());
 
-    #ifdef ESPFILEUPDATER_INSECURE // skip server cert validation
-      WiFiClientSecure client;
-      client.setInsecure();
-      HTTPClient http;
-      http.begin(client, url);
-    # else
-      HTTPClient http;
-      http.begin(url);
-    #endif
+    WiFiClientSecure secureClient;  
+    HTTPClient http;            
+
+    if (_insecure) {
+      secureClient.setInsecure();
+      http.begin(secureClient, remoteURL);
+    } else {
+      http.begin(remoteURL);
+    }
 
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    http.setUserAgent(ESPFILEUPDATER_USERAGENT);
+    http.setUserAgent(_userAgent);
     int code = http.GET();
     if (code == HTTP_CODE_NOT_FOUND) {
       http.end();
@@ -234,7 +232,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::isRemoteFileNewer(const String& loc
       return SERVER_ERROR;
     }
 
-    remoteHash = calculateStreamHash(*http.getStreamPtr(), ESPFILEUPDATER_MAXSIZE);
+    remoteHash = calculateStreamHash(*http.getStreamPtr(), _maxSize);
     http.end();
 
     File localFile = _fs.open(localPath, FILE_READ);
@@ -265,16 +263,10 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::isRemoteFileNewer(const String& loc
   return NOT_MODIFIED;
 }
 
-/// @brief Get the path to the .meta file for a given file.
-/// @param filePath Path to the local file.
-/// @return Path to the .meta file.
 String ESPFileUpdater::metaPath(const String& filePath) {
   return filePath + ".meta";
 }
 
-/// @brief Read the last-modified value from the .meta file.
-/// @param metaPath Path to the .meta file.
-/// @return Last-modified string.
 String ESPFileUpdater::readMetaLastModified(const String& metaPath) {
   File meta = _fs.open(metaPath, FILE_READ);
   if (!meta) return "";
@@ -285,9 +277,6 @@ String ESPFileUpdater::readMetaLastModified(const String& metaPath) {
   return line;
 }
 
-/// @brief Read the hash value from the .meta file.
-/// @param metaPath Path to the .meta file.
-/// @return Hash string.
 String ESPFileUpdater::readMetaHash(const String& metaPath) {
   File meta = _fs.open(metaPath, FILE_READ);
   if (!meta) return "";
@@ -299,9 +288,6 @@ String ESPFileUpdater::readMetaHash(const String& metaPath) {
   return line;
 }
 
-/// @brief Read the original URL from the .meta file.
-/// @param metaPath Path to the .meta file.
-/// @return URL string.
 String ESPFileUpdater::readMetaURL(const String& metaPath) {
   File meta = _fs.open(metaPath, FILE_READ);
   if (!meta) return "";
@@ -311,12 +297,6 @@ String ESPFileUpdater::readMetaURL(const String& metaPath) {
   return line;
 }
 
-/// @brief Write the .meta file with URL, last-modified, and hash.
-/// @param metaPath Path to the .meta file.
-/// @param url Source URL.
-/// @param lastModified Last-modified string (epoch seconds).
-/// @param sha256 SHA256 hash string.
-/// @return true if successful, false otherwise.
 bool ESPFileUpdater::writeMeta(const String& metaPath, const String& url, const String& lastModified, const String& sha256) {
   File meta = _fs.open(metaPath, FILE_WRITE);
   if (!meta) return false;
@@ -327,9 +307,6 @@ bool ESPFileUpdater::writeMeta(const String& metaPath, const String& url, const 
   return true;
 }
 
-/// @brief Calculate the SHA256 hash of a file.
-/// @param file Open file handle.
-/// @return SHA256 hash string.
 String ESPFileUpdater::calculateFileHash(File& file) {
   mbedtls_sha256_context ctx;
   mbedtls_sha256_init(&ctx);
@@ -338,14 +315,14 @@ String ESPFileUpdater::calculateFileHash(File& file) {
   uint8_t buffer[512];
   int len;
   size_t total = 0;
-  while (total < ESPFILEUPDATER_MAXSIZE && (len = file.read(buffer, sizeof(buffer))) > 0) {
+  while (total < _maxSize && (len = file.read(buffer, sizeof(buffer))) > 0) {
     size_t toHash = len;
-    if (total + len > ESPFILEUPDATER_MAXSIZE) {
-      toHash = ESPFILEUPDATER_MAXSIZE - total;
+    if (total + len > _maxSize) {
+      toHash = _maxSize - total;
     }
     mbedtls_sha256_update_ret(&ctx, buffer, toHash);
     total += toHash;
-    if (total >= ESPFILEUPDATER_MAXSIZE) break;
+    if (total >= _maxSize) break;
     yield();
   }
 
@@ -361,10 +338,6 @@ String ESPFileUpdater::calculateFileHash(File& file) {
   return result;
 }
 
-/// @brief Calculate the SHA256 hash of a stream.
-/// @param stream WiFiClient stream.
-/// @param maxBytes Maximum bytes to read.
-/// @return SHA256 hash string.
 String ESPFileUpdater::calculateStreamHash(WiFiClient& stream, size_t maxBytes) {
   mbedtls_sha256_context ctx;
   mbedtls_sha256_init(&ctx);
@@ -392,9 +365,6 @@ String ESPFileUpdater::calculateStreamHash(WiFiClient& stream, size_t maxBytes) 
   return result;
 }
 
-/// @brief Ensure the directory for a given path exists.
-/// @param path File path.
-/// @return true if directory exists or was created, false otherwise.
 bool ESPFileUpdater::ensureDirExists(const String& path) {
   int lastSlash = path.lastIndexOf('/');
   if (lastSlash <= 0) return true;
@@ -406,9 +376,6 @@ bool ESPFileUpdater::ensureDirExists(const String& path) {
   return true;
 }
 
-/// @brief Parse a max-age string (e.g., "7d") to seconds.
-/// @param maxAgeStr Max-age string.
-/// @return Number of seconds.
 time_t ESPFileUpdater::parseMaxAge(const String& maxAgeStr) {
   String s = maxAgeStr;
   s.toLowerCase();
@@ -435,9 +402,6 @@ time_t ESPFileUpdater::parseMaxAge(const String& maxAgeStr) {
   return 0;
 }
 
-/// @brief Parse the last-modified time from the .meta file.
-/// @param metaPath Path to the .meta file.
-/// @return Time as epoch seconds.
 time_t ESPFileUpdater::parseMetaTime(const String& metaPath) {
   File meta = _fs.open(metaPath, FILE_READ);
   if (!meta) return 0;
@@ -457,14 +421,11 @@ time_t ESPFileUpdater::parseMetaTime(const String& metaPath) {
   return 0;
 }
 
-/// @brief Wait until the filesystem is ready (SPIFFS mounted).
-/// @return true if ready, false if timeout.
 bool ESPFileUpdater::waitForSystemReadyFS() {
-  const uint32_t timeoutMs = ESPFILEUPDATER_TIMEOUT;
   uint32_t start = millis();
   if (&_fs == nullptr) return false;
   const char* tmpname = "/.fsreadycheck135792468.tmp";
-  while (millis() - start < timeoutMs) {
+  while (millis() - start < _timeout) {
     File f = _fs.open(tmpname, FILE_WRITE);
     if (f) {
       f.print("test");
@@ -478,13 +439,10 @@ bool ESPFileUpdater::waitForSystemReadyFS() {
   return false;
 }
 
-/// @brief Wait until the system time is ready.
-/// @return true if ready, false if timeout.
 bool ESPFileUpdater::waitForSystemReadyTime() {
-  const uint32_t timeoutMs = ESPFILEUPDATER_TIMEOUT;
   uint32_t start = millis();
   time_t now = time(nullptr);
-  while (now < 100000 && millis() - start < timeoutMs) {
+  while (now < 100000 && millis() - start < _timeout) {
     delay(50);
     now = time(nullptr);
     yield();
@@ -493,16 +451,11 @@ bool ESPFileUpdater::waitForSystemReadyTime() {
   return true;
 }
 
-/// @brief Wait until the network is ready.
-/// @return true if ready, false if timeout.
 bool ESPFileUpdater::waitForSystemReadyNetwork() {
-  const uint32_t timeoutMs = ESPFILEUPDATER_TIMEOUT;
   uint32_t start = millis();
-  while (millis() - start < timeoutMs) {
-    if (ESPFILEUPDATER_CHECKNET) {
-      return true;
-    }
-    delay(100);
+  while (millis() - start < _timeout) {
+    if (networkIsConnected()) return true;
+    delay(500);
     yield();
   }
   return false;
