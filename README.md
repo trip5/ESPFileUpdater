@@ -126,7 +126,7 @@ You may specify these options in any order, one, both, or not at all.
 - Attempts to retrieve date-stamp from remote file
   - If remote file is newer $$\color{lightgreen}[update]$$
   - If remote file is not newer $$\color{red}[stop]$$
-- If the server does not support date-stamp, then stream 100KB from the remote file and generate a hash
+- If the server does not support date-stamp, then stream 100KB (at most) from the remote file and generate a hash
   - This hash is compared to a hash stored in the .meta file
   - If hashes are the same, update the date-stamp in the meta file with the current date $$\color{red}[stop]$$
   - If the hashes differ, assume remote file is newer $$\color{lightgreen}[update]$$
