@@ -7,6 +7,7 @@
 #include <FS.h>
 #include <mbedtls/sha256.h>
 #include <WiFiClient.h>
+#include <WiFiClientSecure.h>
 #include <WiFi.h>
 #ifdef ETH
   #include <ETH.h>
