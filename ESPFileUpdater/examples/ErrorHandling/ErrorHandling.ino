@@ -1,7 +1,8 @@
 #include <Arduino.h>
 #include <WiFi.h>           // ESP32/ESP8266 WiFi
 #include <SPIFFS.h>         // or #include <LittleFS.h> for LittleFS
-#include "espfileupdater.h" // Your ESPFileUpdater class
+
+#include <ESPFileUpdater.h>
 
 // WiFi credentials
 const char* ssid = "YOUR_SSID";

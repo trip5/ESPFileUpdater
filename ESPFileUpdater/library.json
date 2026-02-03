@@ -1,0 +1,25 @@
+{
+  "name": "ESPFileUpdater",
+  "version": "1.1.1",
+  "description": "A library for updating files on ESP devices from a remote HTTP source.",
+  "keywords": ["esp32", "esp8266", "file", "update", "http", "ota"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/trip5/ESPFileUpdater"
+  },
+  "authors": [
+    {
+      "name": "Trip5",
+      "url": "https://github.com/trip5"
+    }
+  ],
+  "frameworks": ["arduino"],
+  "platforms": ["espressif32", "espressif8266"],
+  "license": "MIT",
+  "export": {
+    "include": [
+      "src/*.cpp",
+      "include/*.h"
+    ]
+  }
+}

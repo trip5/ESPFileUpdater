@@ -12,6 +12,13 @@ The ESPFileUpdater library provides functionality for checking and updating file
 - Compatible with SPIFFS (tested) and LittleFS (untested)
 - Follows 3xx redirects
 
+### PlatformIO
+Your platformio.ini should contain:
+```
+lib_deps =
+  trip5/ESPFileUpdater@^1.1.1
+```
+
 ### Installation
 To install the ESPFileUpdater library, follow these steps:
 1. Download the library from the repository.
@@ -31,7 +38,7 @@ To use the ESPFileUpdater library in your project, include the header file and c
 ```cpp
 #include <WiFi.h>
 #include <SPIFFS.h>
-#include "ESPFileUpdater.h"
+#include <ESPFileUpdater.h>
 
 // WiFi credentials
 const char* ssid = "YOUR_SSID";
@@ -181,7 +188,7 @@ updater doesn't block your other operations.  15 seconds is excessive I'm sure b
   ESPFileUpdater updater(SPIFFS);
   updater.setMaxSize(102400);      // 100 KB max stream size for hashing
   updater.setTimeout(15000);       // 15000ms / 15s for timeout (for each check)
-  updater.setUserAgent("ESPFileUpdater/1.0.0 (https://github.com/trip5/ESPFileUpdater)");
+  updater.setUserAgent("MyESPProject/1.2.3 (https://github.com/me/MyESPProject)");
   updater.setInsecure(false);      // insecure mode enabled
 ```
 
@@ -192,7 +199,7 @@ updater doesn't block your other operations.  15 seconds is excessive I'm sure b
   updater = new ESPFileUpdater(SPIFFS);
   updater->setMaxSize(102400);
   updater->setTimeout(15000);
-  updater->setUserAgent("ESPFileUpdater/1.0.0 (https://github.com/trip5/ESPFileUpdater)");
+  updater->setUserAgent("MyESPProject/1.2.3 (https://github.com/me/MyESPProject)");
   updater->setInsecure(false);
 ```
 
@@ -228,10 +235,11 @@ Check the `examples` folder for examples of how to use the ESPFileUpdater librar
 
 ## Update History
 
-| Date       | Version | Release Notes   |
-| ---------- | ------- |---------------- |
-| 2025.07.20 | 1.1.0   | Settings added  |
-| 2025.06.29 | 1.0.0   | First release   |
+| Date       | Version | Release Notes      |
+| ---------- | ------- |------------------- |
+| 2026.02.03 | 1.1.1   | PlatformIO release |
+| 2025.07.20 | 1.1.0   | Settings added     |
+| 2025.06.29 | 1.0.0   | First release      |
 
 ---
 
