@@ -22,6 +22,8 @@ jobs:
           body: "Automated release for ${{ github.ref_name }}"
           draft: false
           prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload Release Asset
         uses: actions/upload-release-asset@v1
