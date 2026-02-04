@@ -16,7 +16,7 @@ The ESPFileUpdater library provides functionality for checking and updating file
 Your platformio.ini should contain:
 ```
 lib_deps =
-  trip5/ESPFileUpdater@^1.1.1
+  trip5/ESPFileUpdater@^1.1.2
 ```
 
 ### Installation
@@ -115,28 +115,28 @@ You may specify these options in any order, one, both, or not at all.
 ## Process
 - Checks local FS for file existence
   - Waits for FS readiness
-    - If not ready $$\color{red}[stop]$$
-  - If file does not exist $$\color{lightgreen}[update]$$
+    - If not ready 🛑 [stop]
+  - If file does not exist ✅ [update]
     - This initial file may get 1970-01-01 as timestamp in .meta file if system time is incorrect
-  - If maxAge not specified $$\color{lightgreen}[update]$$
+  - If maxAge not specified ✅ [update]
     - No .meta file is checked, created, or written (if one exists, it will remain)
-  - If maxAge is "0" $$\color{lightgreen}[update]$$
+  - If maxAge is "0" ✅ [update]
     - This initial file may get 1970-01-01 as timestamp in .meta file if system time is incorrect
 - Waits for system time to be correct
-    - If not ready $$\color{red}[stop]$$
+    - If not ready 🛑 [stop]
 - Reads .meta file URL
-  - if URL is different than specified $$\color{lightgreen}[update]$$
+  - if URL is different than specified ✅ [update]
 - Reads accompanying .meta file for date
-  - If maxAge has not passed then $$\color{red}[stop]$$
+  - If maxAge has not passed then 🛑 [stop]
 - Waits for network connection readiness
-    - If not ready $$\color{red}[stop]$$
+    - If not ready 🛑 [stop]
 - Attempts to retrieve date-stamp from remote file
-  - If remote file is newer $$\color{lightgreen}[update]$$
-  - If remote file is not newer $$\color{red}[stop]$$
+  - If remote file is newer ✅ [update]
+  - If remote file is not newer 🛑 [stop]
 - If the server does not support date-stamp, then stream 100KB (at most) from the remote file and generate a hash
   - This hash is compared to a hash stored in the .meta file
-  - If hashes are the same, update the date-stamp in the meta file with the current date $$\color{red}[stop]$$
-  - If the hashes differ, assume remote file is newer $$\color{lightgreen}[update]$$
+  - If hashes are the same, update the date-stamp in the meta file with the current date 🛑 [stop]
+  - If the hashes differ, assume remote file is newer ✅ [update]
 
 ### Update Process
 
@@ -235,11 +235,12 @@ Check the `examples` folder for examples of how to use the ESPFileUpdater librar
 
 ## Update History
 
-| Date       | Version | Release Notes      |
-| ---------- | ------- |------------------- |
-| 2026.02.03 | 1.1.1   | PlatformIO release |
-| 2025.07.20 | 1.1.0   | Settings added     |
-| 2025.06.29 | 1.0.0   | First release      |
+| Date       | Version | Release Notes             |
+| ---------- | ------- |-------------------------- |
+| 2026.02.04 | 1.1.2   | PlatformIO examples and readme fixed |
+| 2026.02.03 | 1.1.1   | PlatformIO release        |
+| 2025.07.20 | 1.1.0   | Settings added            |
+| 2025.06.29 | 1.0.0   | First release             |
 
 ---
 

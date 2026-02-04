@@ -61,7 +61,7 @@ private:
   uint32_t _timeout   = 15000;     // 15000ms / 15s for timeout (for each check)
   bool     _insecure  = false;     // insecure mode enabled
                                    // the browser / agent to report to servers 
-  String   _userAgent = "ESPFileUpdater/1.1.1 (https://github.com/trip5/ESPFileUpdater)";
+  String   _userAgent = "ESPFileUpdater/1.1.2 (https://github.com/trip5/ESPFileUpdater)";
 
 
   /// @brief Wait until the filesystem is ready (SPIFFS mounted).
