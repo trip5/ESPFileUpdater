@@ -1,4 +1,4 @@
-// ESPFileUpdater 1.1.0 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
+// ESPFileUpdater 1.2.0 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
 
 #pragma once
 
@@ -22,6 +22,8 @@ public:
   void setTimeout(uint32_t ms)        { _timeout = ms; }
   void setUserAgent(const String& ua) { _userAgent = ua; }
   void setInsecure(bool insecure)     { _insecure = insecure; }
+  void setBuffer(size_t bytes)        { _bufferSize = bytes; }
+  void setYieldInterval(uint32_t ms)  { _yieldInterval = ms; }
 
   /// @brief Status codes for update attempts.
   enum UpdateStatus {
@@ -57,10 +59,12 @@ public:
 
 private:
   fs::FS& _fs;
-  size_t   _maxSize   = 102400;    // 100 KB max stream size for hashing
-  uint32_t _timeout   = 15000;     // 15000ms / 15s for timeout (for each check)
-  bool     _insecure  = false;     // insecure mode enabled
-                                   // the browser / agent to report to servers 
+  size_t   _maxSize       = 102400;    // 100 KB max stream size for hashing
+  uint32_t _timeout       = 15000;     // 15000ms / 15s for timeout (for each check)
+  bool     _insecure      = false;     // insecure mode enabled
+  size_t   _bufferSize    = 2048;      // buffer size for reading/writing during downloads
+  uint32_t _yieldInterval = 20;        // yield every X milliseconds (time-based for consistent responsiveness)
+                                       // the browser / agent to report to servers 
   String   _userAgent = "ESPFileUpdater/1.1.2 (https://github.com/trip5/ESPFileUpdater)";
 
 

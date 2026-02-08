@@ -1,6 +1,6 @@
-// ESPFileUpdater 1.1.0 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
+// ESPFileUpdater 1.2.0 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
 
-#include <ESPFileUpdater.h>
+#include "ESPFileUpdater.h"
 #include <time.h>
 #include <WiFiClient.h>
 #include <Arduino.h>
@@ -160,12 +160,109 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
   }
 
   WiFiClient* stream = http.getStreamPtr();
-  uint8_t buf[512];
-  int len;
-  while ((len = stream->readBytes(buf, sizeof(buf))) > 0) {
-    file.write(buf, len);
-    yield();
+  size_t totalBytesWritten = 0;
+  uint32_t lastYieldTime = millis(); // Track time for yield timing
+  
+  // Detect chunked encoding by reading first line and checking if it's a hex number
+  String firstLine = stream->readStringUntil('\n');
+  firstLine.trim();
+  
+  // Try to parse as hex - if successful and reasonable size, it's chunked encoding
+  char* endPtr;
+  long firstChunkSize = strtol(firstLine.c_str(), &endPtr, 16);
+  bool isChunked = (*endPtr == '\0' && firstChunkSize > 0 && firstChunkSize <= 1048576); // Valid hex, 1 byte to 1MB
+  
+  if (isChunked) {
+    // Chunked transfer encoding detected
+    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] Chunked encoding detected, first chunk: 0x%s (%ld bytes)\n", 
+                                localPath.c_str(), firstLine.c_str(), firstChunkSize);
+    
+    // Process first chunk - use configurable buffer for faster transfers
+    uint8_t* buf = new uint8_t[_bufferSize];
+    if (!buf) {
+      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Failed to allocate buffer\n", localPath.c_str());
+      file.close();
+      http.end();
+      return FS_ERROR;
+    }
+    
+    size_t bytesLeftInChunk = firstChunkSize;
+    while (bytesLeftInChunk > 0) {
+      size_t toRead = (bytesLeftInChunk > _bufferSize) ? _bufferSize : bytesLeftInChunk;
+      size_t bytesRead = stream->readBytes(buf, toRead);
+      if (bytesRead == 0) break;
+      
+      file.write(buf, bytesRead);
+      totalBytesWritten += bytesRead;
+      bytesLeftInChunk -= bytesRead;
+      
+      // Yield based on time elapsed
+      if (millis() - lastYieldTime >= _yieldInterval) {
+        yield();
+        lastYieldTime = millis();
+      }
+    }
+    stream->read(); // CR
+    stream->read(); // LF
+    
+    // Process remaining chunks
+    while (stream->connected() || stream->available()) {
+      String chunkSizeLine = stream->readStringUntil('\n');
+      chunkSizeLine.trim();
+      
+      long chunkSize = strtol(chunkSizeLine.c_str(), NULL, 16);
+      if (chunkSize == 0) break; // Last chunk (0\r\n)
+      
+      bytesLeftInChunk = chunkSize;
+      while (bytesLeftInChunk > 0) {
+        size_t toRead = (bytesLeftInChunk > _bufferSize) ? _bufferSize : bytesLeftInChunk;
+        size_t bytesRead = stream->readBytes(buf, toRead);
+        if (bytesRead == 0) break;
+        
+        file.write(buf, bytesRead);
+        totalBytesWritten += bytesRead;
+        bytesLeftInChunk -= bytesRead;
+        
+        // Yield based on time elapsed
+        if (millis() - lastYieldTime >= _yieldInterval) {
+          yield();
+          lastYieldTime = millis();
+        }
+      }
+      stream->read(); // CR
+      stream->read(); // LF
+    }
+    delete[] buf;
+  } else {
+    // Not chunked - write the first line we read, then continue normally
+    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] Non-chunked transfer\n", localPath.c_str());
+    file.print(firstLine);
+    file.print("\n");
+    totalBytesWritten += firstLine.length() + 1;
+    
+    uint8_t* buf = new uint8_t[_bufferSize];
+    if (!buf) {
+      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Failed to allocate buffer\n", localPath.c_str());
+      file.close();
+      http.end();
+      return FS_ERROR;
+    }
+    
+    int len;
+    while ((len = stream->readBytes(buf, _bufferSize)) > 0) {
+      file.write(buf, len);
+      totalBytesWritten += len;
+      
+      // Yield based on time elapsed
+      if (millis() - lastYieldTime >= _yieldInterval) {
+        yield();
+        lastYieldTime = millis();
+      }
+    }
+    delete[] buf;
   }
+  
+  if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] Wrote %d bytes to file\n", localPath.c_str(), (int)totalBytesWritten);
 
   file.close();
   http.end();

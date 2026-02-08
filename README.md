@@ -16,7 +16,7 @@ The ESPFileUpdater library provides functionality for checking and updating file
 Your platformio.ini should contain:
 ```
 lib_deps =
-  trip5/ESPFileUpdater@^1.1.2
+  trip5/ESPFileUpdater@^1.2.0
 ```
 
 ### Installation
@@ -180,7 +180,11 @@ updater doesn't block your other operations.  15 seconds is excessive I'm sure b
 
 `setUserAgent(const String& ua);` Some developers might like to know who / what program is fetching data from them.
 
-`setInsecure(bool insecure);` Enables insecure mode.  It will disable checking of secure certificates when using HTTPS connections. This may help lower memory use.  Actually, setting to `true` seems to make connections fail more often...
+`setInsecure(bool insecure);` Enables insecure mode.  It will disable checking of secure certificates when using HTTPS connections. This may help lower memory use (not much likely).  Setting to `true` seems to make connections fail more often.
+
+`setBuffer(size_t bytes)` Sets the buffer size.  Bigger is faster.
+
+`setYieldInterval(milliseconds)` Sets after how many ms, `yield();` is executed.  Can help responsiveness. Diminishing returns below `10`. Use `0` if other processes need to be greedy.
 
 #### Stack Allocation (with defaults)
 
@@ -190,6 +194,8 @@ updater doesn't block your other operations.  15 seconds is excessive I'm sure b
   updater.setTimeout(15000);       // 15000ms / 15s for timeout (for each check)
   updater.setUserAgent("MyESPProject/1.2.3 (https://github.com/me/MyESPProject)");
   updater.setInsecure(false);      // insecure mode enabled
+  updater.setBuffer(2048);
+  updater.setYieldInterval(20);
 ```
 
 #### Heap Allocation
@@ -201,6 +207,8 @@ updater doesn't block your other operations.  15 seconds is excessive I'm sure b
   updater->setTimeout(15000);
   updater->setUserAgent("MyESPProject/1.2.3 (https://github.com/me/MyESPProject)");
   updater->setInsecure(false);
+  updater->setBuffer(2048);
+  updater->setYieldInterval(20);
 ```
 
 ### UpdateStatus Enum
@@ -237,6 +245,7 @@ Check the `examples` folder for examples of how to use the ESPFileUpdater librar
 
 | Date       | Version | Release Notes             |
 | ---------- | ------- |-------------------------- |
+| 2026.02.08 | 1.2.0   | Handles chunked transfers properly |
 | 2026.02.04 | 1.1.2   | PlatformIO examples and readme fixed |
 | 2026.02.03 | 1.1.1   | PlatformIO release        |
 | 2025.07.20 | 1.1.0   | Settings added            |
