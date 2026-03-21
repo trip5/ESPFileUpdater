@@ -1,9 +1,13 @@
 # ESPFileUpdater Library
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 ## Overview
+
 The ESPFileUpdater library provides functionality for checking and updating files from a remote server on ESP32/ESP8266 devices. It simplifies the process of managing file updates by handling metadata, calculating file hashes, and ensuring that the local files are up-to-date with the remote versions.
 
 ### Features
+
 - Check if a remote file is newer than the local version
 - Download updates if available
 - Manage metadata files to track last modified time and file hashes
@@ -13,19 +17,15 @@ The ESPFileUpdater library provides functionality for checking and updating file
 - Follows 3xx redirects
 
 ### PlatformIO
+
 Your platformio.ini should contain:
 ```
 lib_deps =
   trip5/ESPFileUpdater@^1.2.0
 ```
 
-### Installation
-To install the ESPFileUpdater library, follow these steps:
-1. Download the library from the repository.
-2. Extract the contents to your Arduino libraries folder (usually located in `Documents/Arduino/libraries`).
-3. Restart the Arduino IDE to recognize the new library.
-
 ### Dependent on Internet, File System, and System Time
+
 - It depends on an Internet connection, file system, and system time.
 - Only run it after the these 3 process are stable (usually).
 - If system time is not available at the time it runs, it will download the file only if it does not already exist on the file system.
@@ -33,6 +33,7 @@ To install the ESPFileUpdater library, follow these steps:
 ---
 
 ## Usage
+
 To use the ESPFileUpdater library in your project, include the header file and create an instance of the `ESPFileUpdater` class. Here is a basic example:
 
 ```cpp
@@ -85,6 +86,7 @@ void loop() {
 }
 ```
 ---
+
 ## Syntax
 
 `ESPFileUpdater::UpdateStatus status = updater.checkAndUpdate("/local/file", "https://remote/file", "maxAge", verbose);`
@@ -113,6 +115,7 @@ You may specify these options in any order, one, both, or not at all.
 ---
 
 ## Process
+
 - Checks local FS for file existence
   - Waits for FS readiness
     - If not ready 🛑 [stop]
@@ -163,6 +166,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 ## API Reference
 
 ### ESPFileUpdater Class
+
 - **ESPFileUpdater(fs::FS& fs)**: Constructor that initializes the updater with the specified file system.
 - **UpdateStatus checkAndUpdate(const String& localPath, const String& remoteURL, const String& maxAge)**: Checks if the remote file is newer and updates if necessary.
 
@@ -255,4 +259,7 @@ Check the `examples` folder for examples of how to use the ESPFileUpdater librar
 
 ## License
 
-This library is released under the MIT License. See the LICENSE file for more details.
+This library is released under the MIT License.
+
+See [LICENSE](LICENSE) for details.
+
