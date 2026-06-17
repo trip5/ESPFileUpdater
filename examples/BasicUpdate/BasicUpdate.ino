@@ -27,29 +27,42 @@ void setup() {
     }
     Serial.println("\nWiFi connected!");
 
+    // Set time via NTP for maxAge support
+    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+    time_t now = time(nullptr);
+    while (now < 100000) {
+        delay(100);
+        now = time(nullptr);
+    }
+    Serial.println("Time synchronized!");
+
     // Create updater instance
-    ESPFileUpdater updater(SPIFFS); // or LittleFS
+    ESPFileUpdater updater(SPIFFS);
 
-    // Casts param to updater pointer
-    ESPFileUpdater* updater = (ESPFileUpdater*)param;
+    // Optional: configure settings
+    updater.setMaxSize(1024);
+    updater.setUserAgent("MyESPProject/1.0");
+    updater.setRetryCount(2);
+    updater.setRetryDelay(2000);
 
-    // Run update
-    ESPFileUpdater::UpdateStatus result = updater->checkAndUpdate(
-      "/www/timezones.json.gz", // local file
-      "https://raw.githubusercontent.com/trip5/timezones.json/master/timezones.min.json.gz", //remote file
-      "7d", // how often to check if an update is valid to attempt
-      true // verbose logging
-  );
+    // Run update — checks weekly, logs verbosely
+    ESPFileUpdater::UpdateStatus result = updater.checkAndUpdate(
+      "/www/timezones.json.gz",
+      "https://raw.githubusercontent.com/trip5/timezones.json/master/timezones.json.gz",
+      "7d",
+      true
+    );
 
-
-    // Handle update result (optional)
-  if (result == ESPFileUpdater::UPDATED) {
-    Serial.println("[ESPFileUpdater: File.name.ext] Update completed.");
-  } else if (result == ESPFileUpdater::NOT_MODIFIED||result == ESPFileUpdater::MAX_AGE_NOT_REACHED) {
-    Serial.println("[ESPFileUpdater: File.name.ext] No update needed.");
-  } else {
-    Serial.println("[ESPFileUpdater: File.name.ext] Update failed.");
-  }
+    // Handle update result
+    if (result == ESPFileUpdater::UPDATED) {
+        Serial.println("File was updated successfully.");
+    } else if (result == ESPFileUpdater::NOT_MODIFIED || result == ESPFileUpdater::MAX_AGE_NOT_REACHED) {
+        Serial.println("No update needed.");
+    } else if (result == ESPFileUpdater::OUT_OF_MEMORY) {
+        Serial.println("Insufficient heap memory for operation.");
+    } else {
+        Serial.println("Update failed.");
+    }
 }
 
 void loop() {

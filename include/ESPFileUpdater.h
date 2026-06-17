@@ -1,4 +1,4 @@
-// ESPFileUpdater 1.2.0 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
+// ESPFileUpdater 1.3.0 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
 
 #pragma once
 
@@ -24,6 +24,8 @@ public:
   void setInsecure(bool insecure)     { _insecure = insecure; }
   void setBuffer(size_t bytes)        { _bufferSize = bytes; }
   void setYieldInterval(uint32_t ms)  { _yieldInterval = ms; }
+  void setRetryCount(uint8_t count)   { _retryCount = count; }
+  void setRetryDelay(uint32_t ms)     { _retryDelay = ms; }
 
   /// @brief Status codes for update attempts.
   enum UpdateStatus {
@@ -35,7 +37,8 @@ public:
     FS_ERROR,             ///< Filesystem error.
     TIME_ERROR,           ///< System time not set.
     NETWORK_ERROR,        ///< Network connection not ready.
-    CONNECTION_FAILED     ///< Library connection error
+    CONNECTION_FAILED,    ///< Library connection error
+    OUT_OF_MEMORY         ///< Insufficient heap memory
   };
 
   /// @brief Construct a new ESPFileUpdater object.
@@ -64,7 +67,9 @@ private:
   bool     _insecure      = false;     // insecure mode enabled
   size_t   _bufferSize    = 2048;      // buffer size for reading/writing during downloads
   uint32_t _yieldInterval = 20;        // yield every X milliseconds (time-based for consistent responsiveness)
-                                       // the browser / agent to report to servers 
+  uint8_t  _retryCount    = 2;         // number of retries on transient failures
+  uint32_t _retryDelay    = 2000;      // delay between retries in ms
+                                       // the browser / agent to report to servers
   String   _userAgent = "ESPFileUpdater/1.1.2 (https://github.com/trip5/ESPFileUpdater)";
 
 

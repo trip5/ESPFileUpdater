@@ -1,26 +1,32 @@
 #include <ESPFileUpdater.h>
 
-// This example from ehRadio
+// This example is adapted from ehRadio
+// See: https://github.com/trip5/ehRadio
 
-// List of required web asset files
-static const char* requiredFiles[] = {"dragpl.js","ir.css","irrecord.html","ir.js","logo.svg","options.html","script.js",
-                                     "timezones.json","search.html","search.js","search.css", //"rb_srvrs.json" is optional
-                                     "style.css","updform.html","theme.css","player.html"}; // keep main page at end
+// List of WebUI asset files — matches src/core/config.cpp Config::wwwFiles[]
+static const char* requiredFiles[] = {"curated.js", "options.js", "script.js", "script2.js", "search.js",
+                                      "logo.svg", "icon.png", "locales.json", "rb_srvrs.json", "timezones.json",
+                                      "style.css", "theme.css",
+                                      "curated.html", "irrecord.html", "options.html", "search.html", "updform.html",
+                                      "player.html"};
 static const size_t requiredFilesCount = sizeof(requiredFiles) / sizeof(requiredFiles[0]);
 
 bool wasUpdated(ESPFileUpdater::UpdateStatus status) { return status == ESPFileUpdater::UPDATED; }
 
-// 
-
-#ifdef UPDATEURL
+// Download all required web files at boot (called when wwwFilesExist == false)
+#ifdef FILESURL
   void getRequiredFiles(void* param) {
-    player.sendCommand({PR_STOP, 0});
+    ESPFileUpdater* updater = (ESPFileUpdater*)param;
+    updater->setMaxSize(1024);
+    updater->setUserAgent("ESPFileUpdater/1.3.0 (ehRadio)");
+    updater->setRetryCount(2);
+    updater->setRetryDelay(2000);
+
     char localFileGz[64];
     char localFile[64];
     char tryFile[64];
     char tryUrl[128];
     for (size_t i = 0; i < requiredFilesCount; i++) {
-      display.putRequest(NEWMODE, UPDATING);
       const char* fname = requiredFiles[i];
       snprintf(localFileGz, sizeof(localFileGz), "/www/%s.gz", fname);
       snprintf(localFile, sizeof(localFile), "/www/%s", fname);
@@ -29,98 +35,83 @@ bool wasUpdated(ESPFileUpdater::UpdateStatus status) { return status == ESPFileU
       for (size_t j = 0; j < 2; j++) {
         if (j == 0) { // Try compressed first
           snprintf(tryFile, sizeof(tryFile), "%s", localFileGz);
-          snprintf(tryUrl, sizeof(tryUrl), "%s%s.gz", UPDATEURL, fname);
+          snprintf(tryUrl, sizeof(tryUrl), "%s%s.gz", FILESURL, fname);
         } else { // Fallback to uncompressed
           snprintf(tryFile, sizeof(tryFile), "%s", localFile);
-          snprintf(tryUrl, sizeof(tryUrl), "%s%s", UPDATEURL, fname);
+          snprintf(tryUrl, sizeof(tryUrl), "%s%s", FILESURL, fname);
         }
         Serial.printf("[ESPFileUpdater: %s] Updating required file.\n", tryFile);
-        ESPFileUpdater* getfile = (ESPFileUpdater*)param;
-        ESPFileUpdater::UpdateStatus result = getfile->checkAndUpdate(
+        ESPFileUpdater::UpdateStatus result = updater->checkAndUpdate(
             tryFile,
             tryUrl,
             "",
-            ESPFILEUPDATER_VERBOSE
+            true
         );
         if (result == ESPFileUpdater::UPDATED) {
           Serial.printf("[ESPFileUpdater: %s] Download completed.\n", tryFile);
-          break; // Exit inner loop on success
+          break;
         } else {
-          if (j == 0) Serial.printf("[ESPFileUpdater: %s] Download failed. Will retry for uncompressed file.\n", tryFile);
-          if (j == 1) Serial.printf("[ESPFileUpdater: %s] Download failed. Moving onto next file anyways.\n", tryFile);
+          if (j == 0) Serial.printf("[ESPFileUpdater: %s] Download failed. Retrying uncompressed.\n", tryFile);
+          if (j == 1) Serial.printf("[ESPFileUpdater: %s] Download failed.\n", tryFile);
         }
-      }
-    }
-    // Delete any files in /www that are not in the requiredFiles list
-    File root = SPIFFS.open("/www");
-    if (root && root.isDirectory()) {
-      File file = root.openNextFile();
-      while (file) {
-        const char* path = file.name();
-        // Extract filename from full path
-        const char* name = path;
-        const char* slash = strrchr(path, '/');
-        if (slash) name = slash + 1;
-        bool found = false;
-        for (size_t j = 0; j < requiredFilesCount; j++) {
-          // Check against both compressed and uncompressed names
-          char requiredNameGz[64];
-          snprintf(requiredNameGz, sizeof(requiredNameGz), "%s.gz", requiredFiles[j]);
-          if (strcmp(name, requiredFiles[j]) == 0 || strcmp(name, requiredNameGz) == 0) {
-            found = true;
-            break;
-          }
-        }
-        if (!found) {
-          Serial.printf("[File: /www/%s] Deleting - not in required file list.\n", path);
-          SPIFFS.remove(path);
-        }
-        file = root.openNextFile();
       }
     }
     delay(200);
     ESP.restart();
     vTaskDelete(NULL);
   }
-#endif //#ifdef UPDATEURL
+#endif
 
-void Config::updateFile(void* param, const char* localFile, const char* onlineFile, const char* updatePeriod, const char* simpleName) {
-  Serial.printf("[ESPFileUpdater: %s] Started update.\n", simpleName);
-  ESPFileUpdater* updatefile = (ESPFileUpdater*)param;
-  ESPFileUpdater::UpdateStatus result = updatefile->checkAndUpdate(
-      localFile,
-      onlineFile,
-      updatePeriod,
-      ESPFILEUPDATER_VERBOSE
+// Background update task — checks for newer versions of data files
+void startAsyncServices(void* param) {
+  // Wait for audio stream to stabilize before using network bandwidth
+  vTaskDelay(pdMS_TO_TICKS(10000));
+
+  ESPFileUpdater* updater = (ESPFileUpdater*)param;
+  updater->setMaxSize(1024);
+  updater->setUserAgent("ESPFileUpdater/1.3.0 (ehRadio)");
+  updater->setRetryCount(2);
+  updater->setRetryDelay(2000);
+
+  // Update timezone database (weekly check)
+  ESPFileUpdater::UpdateStatus result = updater->checkAndUpdate(
+    "/www/timezones.json.gz",
+    "https://raw.githubusercontent.com/trip5/timezones.json/master/timezones.json.gz",
+    "1 week",
+    true
   );
   if (result == ESPFileUpdater::UPDATED) {
-    Serial.printf("[ESPFileUpdater: %s] Update completed.\n", simpleName);
-  } else if (result == ESPFileUpdater::NOT_MODIFIED||result == ESPFileUpdater::MAX_AGE_NOT_REACHED) {
-    Serial.printf("[ESPFileUpdater: %s] No update needed.\n", simpleName);
-  } else {
-    Serial.printf("[ESPFileUpdater: %s] Update failed.\n", simpleName);
+    Serial.println("[ESPFileUpdater] Timezones updated");
   }
-}
 
-void startAsyncServices(void* param) {
-  fixPlaylistFileEnding();
-  config.updateFile(param, "/www/timezones.json.gz", TIMEZONES_JSON_URL, "1 week", "Timezones database file");
-  config.updateFile(param, "/www/rb_srvrs.json", RADIO_BROWSER_SERVERS_URL, "4 weeks", "Radio Browser Servers list");
-  cleanStaleSearchResults();
+  // Update Radio-Browser servers list (daily check)
+  result = updater->checkAndUpdate(
+    "/www/rb_srvrs.json",
+    "https://all.api.radio-browser.info/json/servers",
+    "1 day",
+    true
+  );
+  if (result == ESPFileUpdater::UPDATED) {
+    Serial.println("[ESPFileUpdater] RB Servers updated");
+  }
+
+  delete updater;
   vTaskDelete(NULL);
 }
 
-void Config::startAsyncServicesButWait() {
-  if (WiFi.status() != WL_CONNECTED) return;
-  ESPFileUpdater* updater = nullptr;
-  updater = new ESPFileUpdater(SPIFFS);
-  updater->setMaxSize(1024);
-  updater->setUserAgent(ESPFILEUPDATER_USERAGENT);
-  if (emptyFS) {
-    #ifdef UPDATEURL
-      xTaskCreate(getRequiredFiles, "getRequiredFiles", 8192, updater, 2, NULL);
-    #endif
-  } else {
-    xTaskCreate(startAsyncServices, "startAsyncServices", 8192, updater, 2, NULL);
-  }
+void setup() {
+  Serial.begin(115200);
+  SPIFFS.begin(true);
+  WiFi.begin("SSID", "PASSWORD");
+  while (WiFi.status() != WL_CONNECTED) delay(500);
+
+  configTime(0, 0, "pool.ntp.org");
+  time_t now = time(nullptr);
+  while (now < 100000) { delay(100); now = time(nullptr); }
+
+  // Start background updater with heap checking and retry support
+  ESPFileUpdater* updater = new ESPFileUpdater(SPIFFS);
+  xTaskCreatePinnedToCore(startAsyncServices, "startAsyncServices", 8192, updater, 1, NULL, 1);
 }
+
+void loop() {}

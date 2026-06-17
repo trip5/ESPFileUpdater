@@ -82,8 +82,11 @@ void setup() {
             case ESPFileUpdater::NETWORK_ERROR:
                 Serial.println("Network connection error. Update aborted.");
                 break;
-            case ESPFileUpdater::NETWORK_ERROR:
+            case ESPFileUpdater::CONNECTION_FAILED:
                 Serial.println("Upstream library connection error. Aborted.");
+                break;
+            case ESPFileUpdater::OUT_OF_MEMORY:
+                Serial.println("Insufficient heap memory. Aborted.");
                 break;
             default:
                 Serial.println("Unknown update status.");

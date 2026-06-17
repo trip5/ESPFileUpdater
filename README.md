@@ -188,6 +188,10 @@ updater doesn't block your other operations.  15 seconds is excessive I'm sure b
 
 `setYieldInterval(milliseconds)` Sets after how many ms, `yield();` is executed.  Can help responsiveness. Diminishing returns below `10`. Use `0` if other processes need to be greedy.
 
+`setRetryCount(uint8_t count)` Number of retry attempts on transient network failures. Each retry waits `retryDelay` ms.
+
+`setRetryDelay(uint32_t ms)` Delay between retry attempts in milliseconds.
+
 #### Stack Allocation (with defaults)
 
 ```cpp
@@ -198,6 +202,8 @@ updater doesn't block your other operations.  15 seconds is excessive I'm sure b
   updater.setInsecure(false);      // insecure mode enabled
   updater.setBuffer(2048);
   updater.setYieldInterval(20);
+  updater.setRetryCount(2);
+  updater.setRetryDelay(2000);
 ```
 
 #### Heap Allocation
@@ -211,6 +217,8 @@ updater doesn't block your other operations.  15 seconds is excessive I'm sure b
   updater->setInsecure(false);
   updater->setBuffer(2048);
   updater->setYieldInterval(20);
+  updater->setRetryCount(2);
+  updater->setRetryDelay(2000);
 ```
 
 ### UpdateStatus Enum
@@ -224,6 +232,7 @@ updater doesn't block your other operations.  15 seconds is excessive I'm sure b
 - **TIME_ERROR**: Indicates that system time was not set.
 - **NETWORK_ERROR**: Indicates the network connect was not ready.
 - **CONNECTION_FAILED**: Indicates a connection error; error returned by the upstream library will be shown if verbose is on.
+- **OUT_OF_MEMORY**: Indicates insufficient heap memory for the operation (e.g., SSL connection or buffer allocation failed).
 ---
 
 ## SPIFFS Limitations
@@ -247,6 +256,7 @@ Check the `examples` folder for examples of how to use the ESPFileUpdater librar
 
 | Date       | Version | Release Notes             |
 | ---------- | ------- |-------------------------- |
+| 2026.06.17 | 1.3.0   | Added OUT_OF_MEMORY status, heap check before SSL connections, retry logic, nothrow buffer allocation |
 | 2026.02.08 | 1.2.0   | Handles chunked transfers properly |
 | 2026.02.04 | 1.1.2   | PlatformIO examples and readme fixed |
 | 2026.02.03 | 1.1.1   | PlatformIO release        |

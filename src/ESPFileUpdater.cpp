@@ -1,4 +1,4 @@
-// ESPFileUpdater 1.2.0 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
+// ESPFileUpdater 1.3.0 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
 
 #include "ESPFileUpdater.h"
 #include <time.h>
@@ -15,7 +15,23 @@
 #define mbedtls_sha256_finish_ret mbedtls_sha256_finish
 #endif
 
+// Minimum free heap required for SSL/TLS connections (in bytes)
+#define ESPFILEUPDATER_MIN_HEAP_FOR_SSL 30000
+
 ESPFileUpdater::ESPFileUpdater(fs::FS& fs) : _fs(fs) {}
+
+// Check if sufficient heap is available for an SSL connection
+// Returns true if OK, false if heap critically low
+static bool checkHeapForSSL(const String& localPath, bool verbose) {
+    uint32_t freeHeap = ESP.getFreeHeap();
+    if (freeHeap < ESPFILEUPDATER_MIN_HEAP_FOR_SSL) {
+        if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Insufficient heap (%lu bytes, need %d). Aborting.\n",
+            localPath.c_str(), freeHeap, ESPFILEUPDATER_MIN_HEAP_FOR_SSL);
+        return false;
+    }
+    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Heap] Free heap: %lu bytes\n", localPath.c_str(), freeHeap);
+    return true;
+}
 
 /// @copydoc ESPFileUpdater::checkAndUpdate(const String&, const String&, const String&, bool)
 ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localPath, const String& remoteURL, const String& maxAge, bool verbose) {
@@ -81,8 +97,24 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
       return NETWORK_ERROR;
     }
 
-    WiFiClientSecure secureClient;  
-    HTTPClient http;            
+    // Check heap before attempting SSL connection
+    if (!checkHeapForSSL(localPath, verbose)) {
+        return OUT_OF_MEMORY;
+    }
+
+    // Retry loop for transient failures
+    for (uint8_t attempt = 0; attempt <= _retryCount; attempt++) {
+      if (attempt > 0) {
+        if (verbose) Serial.printf("[ESPFileUpdater: %s] [Retry] Attempt %d of %d\n", localPath.c_str(), attempt, _retryCount);
+        delay(_retryDelay);
+        // Recheck heap before each retry
+        if (!checkHeapForSSL(localPath, verbose)) {
+            return OUT_OF_MEMORY;
+        }
+      }
+
+    WiFiClientSecure secureClient;
+    HTTPClient http;
 
     if (_insecure) {
       secureClient.setInsecure();
@@ -97,6 +129,8 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
 
     if (httpCode <= 0) {
       if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Server unreachable.\n", localPath.c_str());
+      http.end();
+      if (attempt < _retryCount) continue; // retry on transient failure
       return SERVER_ERROR;
     }
 
@@ -118,20 +152,39 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
         if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] File not found. Aborting.\n", localPath.c_str());
       if (status == SERVER_ERROR) 
         if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Server error. Aborting.\n", localPath.c_str());
+      http.end();
+      if (attempt < _retryCount) continue; // retry on transient failure
       return status;
     }
 
     if (verbose) Serial.printf("[ESPFileUpdater: %s] [Update] Downloading remote file...\n", localPath.c_str());
     http.end();
-  }
+    break; // success, exit retry loop
+  } // end retry loop
+  } // end else (ForceUpdate == false)
 
   if (waitForSystemReadyNetwork()==false) {
     if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Network connection not ready. Aborting.\n", localPath.c_str());
     return NETWORK_ERROR;
   }
 
-  WiFiClientSecure secureClient;  
-  HTTPClient http;            
+  // Check heap before second SSL connection (download)
+  if (!checkHeapForSSL(localPath, verbose)) {
+    return OUT_OF_MEMORY;
+  }
+
+  // Retry loop for download phase
+  for (uint8_t attempt = 0; attempt <= _retryCount; attempt++) {
+    if (attempt > 0) {
+      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Retry] Download attempt %d of %d\n", localPath.c_str(), attempt, _retryCount);
+      delay(_retryDelay);
+      if (!checkHeapForSSL(localPath, verbose)) {
+        return OUT_OF_MEMORY;
+      }
+    }
+
+  WiFiClientSecure secureClient;
+  HTTPClient http;
 
   if (_insecure) {
     secureClient.setInsecure();
@@ -146,6 +199,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
   if (getCode != HTTP_CODE_OK) {
     if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] GET failed. HTTP code: %d. Aborting.\n", localPath.c_str(), getCode);
     http.end();
+    if (attempt < _retryCount) continue; // retry on transient failure
     return SERVER_ERROR;
   }
 
@@ -178,12 +232,12 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
                                 localPath.c_str(), firstLine.c_str(), firstChunkSize);
     
     // Process first chunk - use configurable buffer for faster transfers
-    uint8_t* buf = new uint8_t[_bufferSize];
+    uint8_t* buf = new (std::nothrow) uint8_t[_bufferSize];
     if (!buf) {
-      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Failed to allocate buffer\n", localPath.c_str());
+      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Failed to allocate buffer (heap: %lu)\n", localPath.c_str(), ESP.getFreeHeap());
       file.close();
       http.end();
-      return FS_ERROR;
+      return OUT_OF_MEMORY;
     }
     
     size_t bytesLeftInChunk = firstChunkSize;
@@ -270,7 +324,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
   if (_fs.exists(localPath)) _fs.remove(localPath);
   _fs.rename(tmpPath, localPath);
 
-  if (maxAge.length() == 0 || maxAge == "") return UPDATED;
+  if (maxAge.length() == 0 || maxAge == "") { http.end(); return UPDATED; }
   if (newHash == "") {
     File localFile = _fs.open(localPath, FILE_READ);
     newHash = calculateFileHash(localFile);
@@ -279,6 +333,10 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
   newLastModified = String((uint32_t)time(nullptr));
   if (verbose) Serial.printf("[ESPFileUpdater: %s] [Complete] File downloaded.\n", localPath.c_str());
   writeMeta(metaPath(localPath), remoteURL, newLastModified, newHash);
+
+  http.end();
+  break; // success, exit retry loop
+  } // end retry loop (download phase)
 
   return UPDATED;
 }
@@ -302,8 +360,8 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::isRemoteFileNewer(const String& loc
     // Fallback: hash both files or check GET status
     if (verbose) Serial.printf("[ESPFileUpdater: %s] [Fallback] No Last-Modified header or server ignored request. Trying GET for file hash...\n", localPath.c_str());
 
-    WiFiClientSecure secureClient;  
-    HTTPClient http;            
+    WiFiClientSecure secureClient;
+    HTTPClient http;
 
     if (_insecure) {
       secureClient.setInsecure();
@@ -322,7 +380,10 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::isRemoteFileNewer(const String& loc
     if (code == -1) {
       http.end();
       if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Connection failed. Library error: %s\n", localPath.c_str(), http.errorToString(code).c_str());
-      return CONNECTION_FAILED;
+      // If HEAD succeeded (HTTP 200) but the GET for hashing failed, assume file is different and update
+      // This handles the case where a concurrent SSL connection (e.g. audio stream) exhausts TLS resources
+      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Fallback] HEAD returned 200, forcing update despite hash failure.\n", localPath.c_str());
+      return UPDATED;
     }
     if (code != HTTP_CODE_OK) {
       http.end();
