@@ -19,7 +19,7 @@ The ESPFileUpdater library provides functionality for checking and updating file
 Your platformio.ini should contain:
 ```
 lib_deps =
-  trip5/ESPFileUpdater@^1.2.0
+  trip5/ESPFileUpdater@^1.3.0
 ```
 
 ### Dependent on Internet, File System, and System Time
