@@ -19,7 +19,7 @@ The ESPFileUpdater library provides functionality for checking and updating file
 Your platformio.ini should contain:
 ```
 lib_deps =
-  trip5/ESPFileUpdater@^1.3.0
+  trip5/ESPFileUpdater@^1.4.0
 ```
 
 ### Dependent on Internet, File System, and System Time
@@ -233,6 +233,7 @@ updater doesn't block your other operations.  15 seconds is excessive I'm sure b
 - **NETWORK_ERROR**: Indicates the network connect was not ready.
 - **CONNECTION_FAILED**: Indicates a connection error; error returned by the upstream library will be shown if verbose is on.
 - **OUT_OF_MEMORY**: Indicates insufficient heap memory for the operation (e.g., SSL connection or buffer allocation failed).
+
 ---
 
 ## SPIFFS Limitations
@@ -256,6 +257,7 @@ Check the `examples` folder for examples of how to use the ESPFileUpdater librar
 
 | Date       | Version | Release Notes             |
 | ---------- | ------- |-------------------------- |
+| 2026.06.26 | 1.4.0   | Retry loop no longer retries on definitive answers |
 | 2026.06.17 | 1.3.0   | Added OUT_OF_MEMORY status, heap check before SSL connections, retry logic, nothrow buffer allocation |
 | 2026.02.08 | 1.2.0   | Handles chunked transfers properly |
 | 2026.02.04 | 1.1.2   | PlatformIO examples and readme fixed |

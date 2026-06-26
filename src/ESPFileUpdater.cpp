@@ -1,4 +1,4 @@
-// ESPFileUpdater 1.3.0 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
+// ESPFileUpdater 1.4.0 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
 
 #include "ESPFileUpdater.h"
 #include <time.h>
@@ -146,12 +146,22 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
     UpdateStatus status = isRemoteFileNewer(localPath, remoteURL, lastModified, newLastModified, newHash, verbose);
 
     if (status != UPDATED) {
-      if (status == NOT_MODIFIED) 
+      if (status == NOT_MODIFIED) {
         if (verbose) Serial.printf("[ESPFileUpdater: %s] [Complete] Remote file is same.\n", localPath.c_str());
-      if (status == FILE_NOT_FOUND) 
+        http.end();
+        return NOT_MODIFIED; // definitive answer, no retry needed
+      }
+      if (status == FILE_NOT_FOUND) {
         if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] File not found. Aborting.\n", localPath.c_str());
-      if (status == SERVER_ERROR) 
+        http.end();
+        return FILE_NOT_FOUND; // definitive answer, no retry needed
+      }
+      if (status == SERVER_ERROR) {
         if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Server error. Aborting.\n", localPath.c_str());
+        http.end();
+        if (attempt < _retryCount) continue; // retry on transient failure
+        return SERVER_ERROR;
+      }
       http.end();
       if (attempt < _retryCount) continue; // retry on transient failure
       return status;
