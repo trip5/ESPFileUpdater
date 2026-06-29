@@ -1,4 +1,4 @@
-// ESPFileUpdater 1.4.0 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
+// ESPFileUpdater 1.4.1 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
 
 #include "ESPFileUpdater.h"
 #include <time.h>
@@ -229,17 +229,18 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
   
   // Detect chunked encoding by reading first line and checking if it's a hex number
   String firstLine = stream->readStringUntil('\n');
-  firstLine.trim();
+  String firstLineTrimmed = firstLine;
+  firstLineTrimmed.trim();
   
   // Try to parse as hex - if successful and reasonable size, it's chunked encoding
   char* endPtr;
-  long firstChunkSize = strtol(firstLine.c_str(), &endPtr, 16);
+  long firstChunkSize = strtol(firstLineTrimmed.c_str(), &endPtr, 16);
   bool isChunked = (*endPtr == '\0' && firstChunkSize > 0 && firstChunkSize <= 1048576); // Valid hex, 1 byte to 1MB
   
   if (isChunked) {
     // Chunked transfer encoding detected
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] Chunked encoding detected, first chunk: 0x%s (%ld bytes)\n", 
-                                localPath.c_str(), firstLine.c_str(), firstChunkSize);
+    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] Chunked encoding detected, first chunk: 0x%s (%ld bytes)\n",
+                                localPath.c_str(), firstLineTrimmed.c_str(), firstChunkSize);
     
     // Process first chunk - use configurable buffer for faster transfers
     uint8_t* buf = new (std::nothrow) uint8_t[_bufferSize];
@@ -298,11 +299,14 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
     }
     delete[] buf;
   } else {
-    // Not chunked - write the first line we read, then continue normally
+    // Not chunked - write the first line we read (untrimmed, binary-safe), then continue normally
     if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] Non-chunked transfer\n", localPath.c_str());
-    file.print(firstLine);
-    file.print("\n");
-    totalBytesWritten += firstLine.length() + 1;
+    size_t firstLineLen = firstLine.length();
+    if (firstLineLen > 0) {
+      file.write((const uint8_t*)firstLine.c_str(), firstLineLen);
+    }
+    file.write((uint8_t)'\n');
+    totalBytesWritten += firstLineLen + 1;
     
     uint8_t* buf = new uint8_t[_bufferSize];
     if (!buf) {
@@ -515,10 +519,92 @@ String ESPFileUpdater::calculateStreamHash(WiFiClient& stream, size_t maxBytes) 
   size_t total = 0;
   int len;
 
-  while (total < maxBytes && stream.connected() && (len = stream.readBytes(buffer, sizeof(buffer))) > 0) {
-    mbedtls_sha256_update_ret(&ctx, buffer, len);
-    total += len;
-    yield();
+  // Detect chunked encoding by reading first line and checking if it's a hex number
+  String firstLine = stream.readStringUntil('\n');
+  String firstLineTrimmed = firstLine;
+  firstLineTrimmed.trim();
+
+  char* endPtr;
+  long firstChunkSize = strtol(firstLineTrimmed.c_str(), &endPtr, 16);
+  bool isChunked = (*endPtr == '\0' && firstChunkSize > 0 && firstChunkSize <= 1048576);
+
+  if (isChunked) {
+    // Chunked transfer — hash decoded payload only, skipping chunk framing bytes
+    // Process first chunk
+    size_t bytesLeftInChunk = firstChunkSize;
+    while (total < maxBytes && bytesLeftInChunk > 0) {
+      size_t toRead = (bytesLeftInChunk > sizeof(buffer)) ? sizeof(buffer) : bytesLeftInChunk;
+      if (total + toRead > maxBytes) toRead = maxBytes - total;
+      len = stream.readBytes(buffer, toRead);
+      if (len == 0) break;
+      mbedtls_sha256_update_ret(&ctx, buffer, len);
+      total += len;
+      bytesLeftInChunk -= len;
+      yield();
+    }
+    // Skip any remaining bytes of first chunk beyond maxBytes
+    while (bytesLeftInChunk > 0) {
+      size_t toRead = (bytesLeftInChunk > sizeof(buffer)) ? sizeof(buffer) : bytesLeftInChunk;
+      len = stream.readBytes(buffer, toRead);
+      if (len == 0) break;
+      bytesLeftInChunk -= len;
+    }
+    stream.read(); // CR
+    stream.read(); // LF
+
+    // Process remaining chunks
+    while (total < maxBytes && (stream.connected() || stream.available())) {
+      String chunkSizeLine = stream.readStringUntil('\n');
+      chunkSizeLine.trim();
+      long chunkSize = strtol(chunkSizeLine.c_str(), NULL, 16);
+      if (chunkSize == 0) break; // Last chunk
+
+      bytesLeftInChunk = chunkSize;
+      while (total < maxBytes && bytesLeftInChunk > 0) {
+        size_t toRead = (bytesLeftInChunk > sizeof(buffer)) ? sizeof(buffer) : bytesLeftInChunk;
+        if (total + toRead > maxBytes) toRead = maxBytes - total;
+        len = stream.readBytes(buffer, toRead);
+        if (len == 0) break;
+        mbedtls_sha256_update_ret(&ctx, buffer, len);
+        total += len;
+        bytesLeftInChunk -= len;
+        yield();
+      }
+      // Skip any remaining bytes of this chunk beyond maxBytes
+      while (bytesLeftInChunk > 0) {
+        size_t toRead = (bytesLeftInChunk > sizeof(buffer)) ? sizeof(buffer) : bytesLeftInChunk;
+        len = stream.readBytes(buffer, toRead);
+        if (len == 0) break;
+        bytesLeftInChunk -= len;
+      }
+      stream.read(); // CR
+      stream.read(); // LF
+    }
+  } else {
+    // Non-chunked — hash firstLine (untrimmed, binary-safe) + newline, then continue
+    size_t firstLineLen = firstLine.length();
+    if (firstLineLen > 0 && total < maxBytes) {
+      size_t toHash = firstLineLen;
+      if (total + toHash > maxBytes) toHash = maxBytes - total;
+      mbedtls_sha256_update_ret(&ctx, (const uint8_t*)firstLine.c_str(), toHash);
+      total += toHash;
+    }
+    // Hash the newline delimiter that readStringUntil consumed
+    if (total < maxBytes) {
+      uint8_t nl = '\n';
+      mbedtls_sha256_update_ret(&ctx, &nl, 1);
+      total++;
+    }
+
+    // Continue with rest of stream
+    while (total < maxBytes && stream.connected() && (len = stream.readBytes(buffer, sizeof(buffer))) > 0) {
+      size_t toHash = len;
+      if (total + toHash > maxBytes) toHash = maxBytes - total;
+      mbedtls_sha256_update_ret(&ctx, buffer, toHash);
+      total += toHash;
+      if (total >= maxBytes) break;
+      yield();
+    }
   }
 
   uint8_t hash[32];

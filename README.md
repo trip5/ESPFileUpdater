@@ -19,7 +19,7 @@ The ESPFileUpdater library provides functionality for checking and updating file
 Your platformio.ini should contain:
 ```
 lib_deps =
-  trip5/ESPFileUpdater@^1.4.0
+  trip5/ESPFileUpdater@^1.4.1
 ```
 
 ### Dependent on Internet, File System, and System Time
@@ -257,6 +257,7 @@ Check the `examples` folder for examples of how to use the ESPFileUpdater librar
 
 | Date       | Version | Release Notes             |
 | ---------- | ------- |-------------------------- |
+| 2026.06.29 | 1.4.1   | Fixed edge-case of non-chunked binary file corruption |
 | 2026.06.26 | 1.4.0   | Retry loop no longer retries on definitive answers |
 | 2026.06.17 | 1.3.0   | Added OUT_OF_MEMORY status, heap check before SSL connections, retry logic, nothrow buffer allocation |
 | 2026.02.08 | 1.2.0   | Handles chunked transfers properly |
