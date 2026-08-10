@@ -1,4 +1,4 @@
-// ESPFileUpdater 1.4.1 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
+// ESPFileUpdater 1.4.2 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
 
 #include "ESPFileUpdater.h"
 #include <time.h>
@@ -16,12 +16,16 @@
 #endif
 
 // Minimum free heap required for SSL/TLS connections (in bytes)
-#define ESPFILEUPDATER_MIN_HEAP_FOR_SSL 30000
+// mbedtls needs ~34-36KB contiguous (16KB in + 16KB out + context). 40KB gives safe margin.
+#define ESPFILEUPDATER_MIN_HEAP_FOR_SSL 40000
 
 ESPFileUpdater::ESPFileUpdater(fs::FS& fs) : _fs(fs) {}
 
-// Check if sufficient heap is available for an SSL connection
-// Returns true if OK, false if heap critically low
+// Check if sufficient heap is available for an SSL connection.
+// Returns true if OK, false if heap critically low.
+// NOTE: The caller is responsible for holding a contiguous reserve block
+// (malloc + hold through setup + free immediately before SSL handshake)
+// to prevent the audio task from fragmenting the heap between check and use.
 static bool checkHeapForSSL(const String& localPath, bool verbose) {
     uint32_t freeHeap = ESP.getFreeHeap();
     if (freeHeap < ESPFILEUPDATER_MIN_HEAP_FOR_SSL) {
@@ -102,7 +106,10 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
         return OUT_OF_MEMORY;
     }
 
-    // Retry loop for transient failures
+    // Retry loop for transient failures.
+    // Each iteration allocates a contiguous heap reserve, holds it through
+    // HTTPClient setup to prevent another task from fragmenting DRAM, and
+    // frees it immediately before the TLS handshake.
     for (uint8_t attempt = 0; attempt <= _retryCount; attempt++) {
       if (attempt > 0) {
         if (verbose) Serial.printf("[ESPFileUpdater: %s] [Retry] Attempt %d of %d\n", localPath.c_str(), attempt, _retryCount);
@@ -112,6 +119,14 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
             return OUT_OF_MEMORY;
         }
       }
+
+    // Allocate contiguous heap reserve to prevent fragmentation
+    void* sslReserve = malloc(ESPFILEUPDATER_MIN_HEAP_FOR_SSL);
+    if (!sslReserve) {
+      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Failed to reserve %d bytes for SSL (heap: %lu)\n",
+          localPath.c_str(), ESPFILEUPDATER_MIN_HEAP_FOR_SSL, ESP.getFreeHeap());
+      return OUT_OF_MEMORY;
+    }
 
     WiFiClientSecure secureClient;
     HTTPClient http;
@@ -125,6 +140,10 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
 
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     http.setUserAgent(_userAgent);
+
+    // Free reserve immediately before TLS handshake so mbedtls can claim it
+    free(sslReserve);
+
     int httpCode = http.sendRequest("HEAD");
 
     if (httpCode <= 0) {
@@ -183,7 +202,10 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
     return OUT_OF_MEMORY;
   }
 
-  // Retry loop for download phase
+  // Retry loop for download phase.
+  // Each iteration allocates a contiguous heap reserve, holds it through
+  // HTTPClient setup to prevent another task from fragmenting DRAM, and
+  // frees it immediately before the TLS handshake.
   for (uint8_t attempt = 0; attempt <= _retryCount; attempt++) {
     if (attempt > 0) {
       if (verbose) Serial.printf("[ESPFileUpdater: %s] [Retry] Download attempt %d of %d\n", localPath.c_str(), attempt, _retryCount);
@@ -192,6 +214,14 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
         return OUT_OF_MEMORY;
       }
     }
+
+  // Allocate contiguous heap reserve to prevent fragmentation
+  void* sslReserve = malloc(ESPFILEUPDATER_MIN_HEAP_FOR_SSL);
+  if (!sslReserve) {
+    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Failed to reserve %d bytes for SSL (heap: %lu)\n",
+        localPath.c_str(), ESPFILEUPDATER_MIN_HEAP_FOR_SSL, ESP.getFreeHeap());
+    return OUT_OF_MEMORY;
+  }
 
   WiFiClientSecure secureClient;
   HTTPClient http;
@@ -205,6 +235,10 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
 
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   http.setUserAgent(_userAgent);
+
+  // Free reserve immediately before TLS handshake so mbedtls can claim it
+  free(sslReserve);
+
   int getCode = http.GET();
   if (getCode != HTTP_CODE_OK) {
     if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] GET failed. HTTP code: %d. Aborting.\n", localPath.c_str(), getCode);
