@@ -1,4 +1,4 @@
-// ESPFileUpdater 1.4.2 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
+// ESPFileUpdater 1.5.0 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
 
 #pragma once
 
@@ -70,7 +70,7 @@ private:
   uint8_t  _retryCount    = 2;         // number of retries on transient failures
   uint32_t _retryDelay    = 2000;      // delay between retries in ms
                                        // the browser / agent to report to servers
-  String   _userAgent = "ESPFileUpdater/1.1.2 (https://github.com/trip5/ESPFileUpdater)";
+  String   _userAgent = "ESPFileUpdater/1.5.0 (https://github.com/trip5/ESPFileUpdater)";
 
 
   /// @brief Wait until the filesystem is ready (SPIFFS mounted).
@@ -107,18 +107,56 @@ private:
   /// @return Hash string.
   String readMetaHash(const String& metaPath);
 
+  /// @brief Read the recorded file size from the .meta file.
+  /// @param metaPath Path to the .meta file.
+  /// @return Size as a string, empty when the file predates size tracking.
+  String readMetaSize(const String& metaPath);
+
   /// @brief Read the original URL from the .meta file.
   /// @param metaPath Path to the .meta file.
   /// @return URL string.
   String readMetaURL(const String& metaPath);
 
-  /// @brief Write the .meta file with URL, last-modified, and hash.
+  /// @brief Write the .meta file with URL, last-modified, hash and file size.
   /// @param metaPath Path to the .meta file.
   /// @param url Source URL.
   /// @param lastModified Last-modified string (epoch seconds).
   /// @param sha256 SHA256 hash string.
+  /// @param fileSize Verified size of the file on disk, in bytes.
   /// @return true if successful, false otherwise.
-  bool writeMeta(const String& metaPath, const String& url, const String& lastModified, const String& sha256);
+  bool writeMeta(const String& metaPath, const String& url, const String& lastModified,
+                 const String& sha256, size_t fileSize);
+
+  /// @brief Copy an HTTP response body into a file, verifying that it is complete.
+  ///        Short writes, truncated bodies, missing terminal chunks and framing
+  ///        errors are all treated as failures.
+  /// @param stream Response byte stream.
+  /// @param filePath Destination file (created/truncated).
+  /// @param chunked true when the body may use chunked transfer encoding.
+  /// @param contentLength Expected body length from Content-Length, or -1 when unknown.
+  /// @param bytesWritten Output: payload bytes written to the file.
+  /// @param storageError Output: true when the failure was a filesystem/write error.
+  /// @param localPath Path used only for log prefixes.
+  /// @param verbose Enable verbose logging.
+  /// @return true only when every byte was received and written.
+  bool copyBodyToFile(WiFiClient& stream, const String& filePath, bool chunked,
+                      int32_t contentLength, size_t& bytesWritten, bool& storageError,
+                      const String& localPath, bool verbose);
+
+  /// @brief Install a verified temp file next to a destination file.
+  ///        The .meta file is invalidated before the old file is moved aside, and the
+  ///        previous file is restored if the install or its verification fails.
+  /// @param localPath Destination path.
+  /// @param tmpPath Verified temp file to install.
+  /// @param expectedSize Size the installed file must have.
+  /// @param verbose Enable verbose logging.
+  /// @return true if the destination now holds exactly expectedSize bytes.
+  bool swapInVerifiedFile(const String& localPath, const String& tmpPath, size_t expectedSize, bool verbose);
+
+  /// @brief Parse a chunk-size line from a chunked transfer.
+  /// @param line Chunk-size line, possibly with a chunk extension.
+  /// @return Chunk size in bytes (0 for the terminal chunk), or -1 if not valid framing.
+  static long parseChunkSizeLine(const String& line);
 
   /// @brief Calculate the SHA256 hash of a file.
   /// @param file Open file handle.
@@ -128,8 +166,9 @@ private:
   /// @brief Calculate the SHA256 hash of a stream.
   /// @param stream WiFiClient stream.
   /// @param maxBytes Maximum bytes to read.
-  /// @return SHA256 hash string.
-  String calculateStreamHash(WiFiClient& stream, size_t maxBytes);
+  /// @param chunked true when the body may use chunked transfer encoding.
+  /// @return SHA256 hash string, or empty when the body could not be read reliably.
+  String calculateStreamHash(WiFiClient& stream, size_t maxBytes, bool chunked);
 
   /// @brief Ensure the directory for a given path exists.
   /// @param path File path.
@@ -155,12 +194,14 @@ private:
   /// @param localPath Path to the local file.
   /// @param url Remote file URL.
   /// @param lastModified Last-modified string from server.
+  /// @param remoteSize Size reported by the server, or -1 when unknown.
   /// @param newLastModified Output: new last-modified string.
   /// @param remoteHash Output: remote file hash.
   /// @param verbose Enable verbose logging.
   /// @return UpdateStatus indicating if update is needed.
   UpdateStatus isRemoteFileNewer(const String& localPath, const String& url,
                                  const String& lastModified,
+                                 int32_t remoteSize,
                                  String& newLastModified,
                                  String& remoteHash,
                                  bool verbose);

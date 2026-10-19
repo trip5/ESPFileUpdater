@@ -8,9 +8,10 @@ The ESPFileUpdater library provides functionality for checking and updating file
 
 - Check if a remote file is newer than the local version
 - Download updates if available
-- Manage metadata files to track last modified time and file hashes
+- Manage metadata files to track last modified time, file hashes and file sizes
 - Support for max age checks to prevent unnecessary updates
 - Will download even if local file missing
+- Verified downloads: a file is only replaced once the transfer is confirmed complete and the installed result is size-checked
 - Compatible with SPIFFS (tested) and LittleFS (untested)
 - Follows 3xx redirects
 
@@ -19,7 +20,7 @@ The ESPFileUpdater library provides functionality for checking and updating file
 Your platformio.ini should contain:
 ```
 lib_deps =
-  trip5/ESPFileUpdater@^1.4.2
+  trip5/ESPFileUpdater@^1.5.0
 ```
 
 ### Dependent on Internet, File System, and System Time
@@ -127,6 +128,8 @@ You may specify these options in any order, one, both, or not at all.
     - If not ready 🛑 [stop]
 - Reads .meta file URL
   - if URL is different than specified ✅ [update]
+- Validates the .meta file against the file on disk
+  - If the size recorded in the .meta file does not match the actual file size, the .meta file is stale: it is deleted and the file is re-downloaded ✅ [update]
 - Reads accompanying .meta file for date
   - If maxAge has not passed then 🛑 [stop]
 - Waits for network connection readiness
@@ -135,16 +138,28 @@ You may specify these options in any order, one, both, or not at all.
   - If remote file is newer ✅ [update]
   - If remote file is not newer 🛑 [stop]
 - If the server does not support date-stamp, then stream 100KB (at most) from the remote file and generate a hash
-  - This hash is compared to a hash stored in the .meta file
+  - This hash is compared to the hash stored in the .meta file
+  - The response size must be known and no larger than the hashing window, otherwise the hash cannot prove equality ✅ [update]
+  - If the sizes differ ✅ [update]
   - If hashes are the same, update the date-stamp in the meta file with the current date 🛑 [stop]
   - If the hashes differ, assume remote file is newer ✅ [update]
 
 ### Update Process
 
-- Downloads to temporary file first for safety
-- Deletes old file, renames new file
+- Removes leftover `.tmp` and `.bak` files from any interrupted attempt
+- Downloads to a temporary `.tmp` file and checks every write
+- The transfer must be complete before anything else happens
+  - If `Content-Length` is known, the received byte count must match it exactly
+  - For chunked transfers, a terminal zero-length chunk must be received
+  - If the response has neither, the body is copied verbatim and a warning is logged (completeness cannot be verified)
+  - Truncated, short-written or malformed transfers discard the `.tmp` file and keep the current file 🛑 [retry or stop]
+- Compares the `.tmp` file size on flash to the received byte count
+- Deletes the `.meta` file before the current file is touched, so it can never describe a missing or partial file
+- Renames the current file to `.bak`, renames the `.tmp` file into place, then verifies the installed size
+  - If any step fails, the `.bak` file is restored and an error is returned 🛑 [stop]
+- Removes the `.bak` file only after the new file has been verified
 - Hashes new file (if not already done during stream)
-- Writes accompanying .meta file
+- Writes the accompanying .meta file last, as the final step
 
 ### The .meta File
 
@@ -153,11 +168,17 @@ Example
 https://example.com/firmware.bin
 1718726400
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+131072
 ```
 
 - The URL the file was last retrieved from
 - UNIX EPOCH of the last update
 - Hash
+- Size of the file in bytes, verified at the time of the update
+
+The .meta file is written only after the downloaded file has been verified and installed,
+and it is deleted before the old file is replaced. A .meta file without a size line
+(from an older version) is still read, and is upgraded the next time it is written.
 
 ---
 
@@ -240,7 +261,7 @@ updater doesn't block your other operations.  15 seconds is excessive I'm sure b
 
 Keep in mind file names (including path) must be 31 characters or less.
 Because of this limitation and the fact this library adds
-extra extensions to the .meta and .tmp download files,
+extra extensions to the .meta and .tmp download files (plus a transient .bak file),
 the real usable file name length limit is 27 characters!
 
 I'm not sure about LittleFS limitations.
@@ -257,6 +278,7 @@ Check the `examples` folder for examples of how to use the ESPFileUpdater librar
 
 | Date       | Version | Release Notes             |
 | ---------- | ------- |-------------------------- |
+| 2026.10.19 | 1.5.0   | Verified downloads: incomplete transfers are rejected, the swap is size-checked with a .bak rollback, and the .meta file is written only after the swap and records the file size |
 | 2026.08.10 | 1.4.2   | Add heap coalesce and reserve so SSL connections always get 40KB contiguous DRAM |
 | 2026.06.29 | 1.4.1   | Fixed edge-case of non-chunked binary file corruption |
 | 2026.06.26 | 1.4.0   | Retry loop no longer retries on definitive answers |

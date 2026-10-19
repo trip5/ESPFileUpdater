@@ -1,7 +1,8 @@
-// ESPFileUpdater 1.4.2 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
+// ESPFileUpdater 1.5.0 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
 
 #include "ESPFileUpdater.h"
 #include <time.h>
+#include <new>
 #include <WiFiClient.h>
 #include <Arduino.h>
 #include <lwip/sockets.h>
@@ -19,7 +20,28 @@
 // mbedtls needs ~34-36KB contiguous (16KB in + 16KB out + context). 40KB gives safe margin.
 #define ESPFILEUPDATER_MIN_HEAP_FOR_SSL 40000
 
+// Largest chunk size accepted while parsing chunked transfer framing (1 MB)
+#define ESPFILEUPDATER_MAX_CHUNK_SIZE 1048576
+
 ESPFileUpdater::ESPFileUpdater(fs::FS& fs) : _fs(fs) {}
+
+// Convert a raw SHA256 digest into a lowercase hex string.
+static String hashToString(const uint8_t* hash) {
+  String result;
+  for (int i = 0; i < 32; i++) {
+    if (hash[i] < 16) result += "0";
+    result += String(hash[i], HEX);
+  }
+  return result;
+}
+
+// Yield only once the configured interval has elapsed, keeping other tasks responsive.
+static void yieldIfDue(uint32_t& lastYieldTime, uint32_t interval) {
+  if (millis() - lastYieldTime >= interval) {
+    yield();
+    lastYieldTime = millis();
+  }
+}
 
 // Check if sufficient heap is available for an SSL connection.
 // Returns true if OK, false if heap critically low.
@@ -29,11 +51,11 @@ ESPFileUpdater::ESPFileUpdater(fs::FS& fs) : _fs(fs) {}
 static bool checkHeapForSSL(const String& localPath, bool verbose) {
     uint32_t freeHeap = ESP.getFreeHeap();
     if (freeHeap < ESPFILEUPDATER_MIN_HEAP_FOR_SSL) {
-        if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Insufficient heap (%lu bytes, need %d). Aborting.\n",
-            localPath.c_str(), freeHeap, ESPFILEUPDATER_MIN_HEAP_FOR_SSL);
+        if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Insufficient heap (%u bytes, need %d). Aborting.\n",
+            localPath.c_str(), (unsigned)freeHeap, ESPFILEUPDATER_MIN_HEAP_FOR_SSL);
         return false;
     }
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Heap] Free heap: %lu bytes\n", localPath.c_str(), freeHeap);
+    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Heap] Free heap: %u bytes\n", localPath.c_str(), (unsigned)freeHeap);
     return true;
 }
 
@@ -64,13 +86,29 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
       if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] System time not set. Aborting update.", localPath.c_str());
       return TIME_ERROR;
     }
-    time_t now = time(nullptr);
     // check .meta file if URL has changed
     if (_fs.exists(meta)) {
       String storedURL = readMetaURL(meta);
       if (storedURL.length() > 0 && storedURL != remoteURL) {
         if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] Source URL changed. Forcing re-download.\n", localPath.c_str());
         ForceUpdate = true;
+      } else {
+        // A .meta file must never outlive the file it describes. If the recorded size
+        // no longer matches the file on disk, the .meta is stale and is discarded.
+        String storedSize = readMetaSize(meta);
+        if (storedSize.length() > 0) {
+          File localFile = _fs.open(localPath, FILE_READ);
+          bool haveLocalFile = (bool)localFile;
+          size_t localSize = haveLocalFile ? localFile.size() : 0;
+          if (haveLocalFile) localFile.close();
+          unsigned long metaSize = strtoul(storedSize.c_str(), NULL, 10);
+          if (!haveLocalFile || (size_t)metaSize != localSize) {
+            if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] .meta size (%lu) does not match local size (%u). Discarding .meta and forcing re-download.\n",
+                                        localPath.c_str(), metaSize, (unsigned)localSize);
+            _fs.remove(meta);
+            ForceUpdate = true;
+          }
+        }
       }
     }
   }
@@ -123,8 +161,8 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
     // Allocate contiguous heap reserve to prevent fragmentation
     void* sslReserve = malloc(ESPFILEUPDATER_MIN_HEAP_FOR_SSL);
     if (!sslReserve) {
-      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Failed to reserve %d bytes for SSL (heap: %lu)\n",
-          localPath.c_str(), ESPFILEUPDATER_MIN_HEAP_FOR_SSL, ESP.getFreeHeap());
+      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Failed to reserve %d bytes for SSL (heap: %u)\n",
+          localPath.c_str(), ESPFILEUPDATER_MIN_HEAP_FOR_SSL, (unsigned)ESP.getFreeHeap());
       return OUT_OF_MEMORY;
     }
 
@@ -154,15 +192,18 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
     }
 
     String lastModified = "";
+    int32_t remoteSize = -1;
     if (verbose) Serial.printf("[ESPFileUpdater: %s] [Response] HTTP code: %d\n", localPath.c_str(), httpCode);
     if (httpCode == HTTP_CODE_NOT_FOUND) {
       if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] File not found on server. Trying GET anyways.\n", localPath.c_str());
     } else {
       lastModified = http.header("Last-Modified");
+      remoteSize = (int32_t)http.getSize();
       if (verbose) Serial.printf("[ESPFileUpdater: %s] [Header] Last-Modified: %s\n", localPath.c_str(), lastModified.c_str());
+      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Header] Content-Length: %d\n", localPath.c_str(), (int)remoteSize);
     }
 
-    UpdateStatus status = isRemoteFileNewer(localPath, remoteURL, lastModified, newLastModified, newHash, verbose);
+    UpdateStatus status = isRemoteFileNewer(localPath, remoteURL, lastModified, remoteSize, newLastModified, newHash, verbose);
 
     if (status != UPDATED) {
       if (status == NOT_MODIFIED) {
@@ -218,8 +259,8 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
   // Allocate contiguous heap reserve to prevent fragmentation
   void* sslReserve = malloc(ESPFILEUPDATER_MIN_HEAP_FOR_SSL);
   if (!sslReserve) {
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Failed to reserve %d bytes for SSL (heap: %lu)\n",
-        localPath.c_str(), ESPFILEUPDATER_MIN_HEAP_FOR_SSL, ESP.getFreeHeap());
+    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Failed to reserve %d bytes for SSL (heap: %u)\n",
+        localPath.c_str(), ESPFILEUPDATER_MIN_HEAP_FOR_SSL, (unsigned)ESP.getFreeHeap());
     return OUT_OF_MEMORY;
   }
 
@@ -250,146 +291,92 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
   ensureDirExists(localPath);
 
   String tmpPath = localPath + ".tmp";
-  File file = _fs.open(tmpPath, FILE_WRITE);
-  if (!file) {
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Cannot open temp file for writing. Aborting.\n", localPath.c_str());
+  String bakPath = localPath + ".bak";
+
+  // Discard leftovers from an interrupted attempt. A stale .tmp must never be
+  // mistaken for a completed transfer.
+  if (_fs.exists(tmpPath)) _fs.remove(tmpPath);
+  if (_fs.exists(bakPath)) _fs.remove(bakPath);
+
+  // HTTPClient reports -1 when there is no Content-Length (chunked or
+  // close-delimited), in which case the body framing is validated while streaming.
+  int32_t expectedSize = (int32_t)http.getSize();
+  bool chunkedBody = (expectedSize < 0);
+
+  WiFiClient* stream = http.getStreamPtr();
+  size_t totalBytesWritten = 0;
+  bool storageError = false;
+
+  if (verbose) Serial.printf("[ESPFileUpdater: %s] [Update] Downloading (%d bytes%s)...\n",
+                              localPath.c_str(), (int)expectedSize,
+                              chunkedBody ? ", length unknown" : "");
+
+  if (!copyBodyToFile(*stream, tmpPath, chunkedBody, expectedSize,
+                      totalBytesWritten, storageError, localPath, verbose)) {
+    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Incomplete download (%u bytes received). Partial file discarded.\n",
+                                localPath.c_str(), (unsigned)totalBytesWritten);
+    http.end();
+    if (attempt < _retryCount && !storageError) continue; // retry interrupted transfers
+    return storageError ? FS_ERROR : SERVER_ERROR;
+  }
+
+  if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] Wrote %u bytes to file (verified)\n",
+                              localPath.c_str(), (unsigned)totalBytesWritten);
+
+  // The staged file must be exactly what was received before it is allowed to
+  // replace the destination file.
+  File staged = _fs.open(tmpPath, FILE_READ);
+  bool stagedOpened = (bool)staged;
+  size_t stagedSize = stagedOpened ? staged.size() : 0;
+  if (stagedOpened) staged.close();
+  if (!stagedOpened || stagedSize != totalBytesWritten) {
+    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Temp file verification failed (%u bytes on flash, %u received). Aborting.\n",
+                                localPath.c_str(), (unsigned)stagedSize, (unsigned)totalBytesWritten);
+    _fs.remove(tmpPath);
     http.end();
     return FS_ERROR;
   }
 
-  WiFiClient* stream = http.getStreamPtr();
-  size_t totalBytesWritten = 0;
-  uint32_t lastYieldTime = millis(); // Track time for yield timing
-  
-  // Detect chunked encoding by reading first line and checking if it's a hex number
-  String firstLine = stream->readStringUntil('\n');
-  String firstLineTrimmed = firstLine;
-  firstLineTrimmed.trim();
-  
-  // Try to parse as hex - if successful and reasonable size, it's chunked encoding
-  char* endPtr;
-  long firstChunkSize = strtol(firstLineTrimmed.c_str(), &endPtr, 16);
-  bool isChunked = (*endPtr == '\0' && firstChunkSize > 0 && firstChunkSize <= 1048576); // Valid hex, 1 byte to 1MB
-  
-  if (isChunked) {
-    // Chunked transfer encoding detected
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] Chunked encoding detected, first chunk: 0x%s (%ld bytes)\n",
-                                localPath.c_str(), firstLineTrimmed.c_str(), firstChunkSize);
-    
-    // Process first chunk - use configurable buffer for faster transfers
-    uint8_t* buf = new (std::nothrow) uint8_t[_bufferSize];
-    if (!buf) {
-      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Failed to allocate buffer (heap: %lu)\n", localPath.c_str(), ESP.getFreeHeap());
-      file.close();
-      http.end();
-      return OUT_OF_MEMORY;
-    }
-    
-    size_t bytesLeftInChunk = firstChunkSize;
-    while (bytesLeftInChunk > 0) {
-      size_t toRead = (bytesLeftInChunk > _bufferSize) ? _bufferSize : bytesLeftInChunk;
-      size_t bytesRead = stream->readBytes(buf, toRead);
-      if (bytesRead == 0) break;
-      
-      file.write(buf, bytesRead);
-      totalBytesWritten += bytesRead;
-      bytesLeftInChunk -= bytesRead;
-      
-      // Yield based on time elapsed
-      if (millis() - lastYieldTime >= _yieldInterval) {
-        yield();
-        lastYieldTime = millis();
-      }
-    }
-    stream->read(); // CR
-    stream->read(); // LF
-    
-    // Process remaining chunks
-    while (stream->connected() || stream->available()) {
-      String chunkSizeLine = stream->readStringUntil('\n');
-      chunkSizeLine.trim();
-      
-      long chunkSize = strtol(chunkSizeLine.c_str(), NULL, 16);
-      if (chunkSize == 0) break; // Last chunk (0\r\n)
-      
-      bytesLeftInChunk = chunkSize;
-      while (bytesLeftInChunk > 0) {
-        size_t toRead = (bytesLeftInChunk > _bufferSize) ? _bufferSize : bytesLeftInChunk;
-        size_t bytesRead = stream->readBytes(buf, toRead);
-        if (bytesRead == 0) break;
-        
-        file.write(buf, bytesRead);
-        totalBytesWritten += bytesRead;
-        bytesLeftInChunk -= bytesRead;
-        
-        // Yield based on time elapsed
-        if (millis() - lastYieldTime >= _yieldInterval) {
-          yield();
-          lastYieldTime = millis();
-        }
-      }
-      stream->read(); // CR
-      stream->read(); // LF
-    }
-    delete[] buf;
-  } else {
-    // Not chunked - write the first line we read (untrimmed, binary-safe), then continue normally
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] Non-chunked transfer\n", localPath.c_str());
-    size_t firstLineLen = firstLine.length();
-    if (firstLineLen > 0) {
-      file.write((const uint8_t*)firstLine.c_str(), firstLineLen);
-    }
-    file.write((uint8_t)'\n');
-    totalBytesWritten += firstLineLen + 1;
-    
-    uint8_t* buf = new uint8_t[_bufferSize];
-    if (!buf) {
-      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Failed to allocate buffer\n", localPath.c_str());
-      file.close();
-      http.end();
-      return FS_ERROR;
-    }
-    
-    int len;
-    while ((len = stream->readBytes(buf, _bufferSize)) > 0) {
-      file.write(buf, len);
-      totalBytesWritten += len;
-      
-      // Yield based on time elapsed
-      if (millis() - lastYieldTime >= _yieldInterval) {
-        yield();
-        lastYieldTime = millis();
-      }
-    }
-    delete[] buf;
-  }
-  
-  if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] Wrote %d bytes to file\n", localPath.c_str(), (int)totalBytesWritten);
-
-  file.close();
   http.end();
 
-  if (_fs.exists(localPath)) _fs.remove(localPath);
-  _fs.rename(tmpPath, localPath);
+  // The .meta file is invalidated inside the swap, immediately before the old file
+  // is moved aside, so it can never describe a missing or partial file.
+  if (!swapInVerifiedFile(localPath, tmpPath, totalBytesWritten, verbose)) {
+    return FS_ERROR;
+  }
 
-  if (maxAge.length() == 0 || maxAge == "") { http.end(); return UPDATED; }
+  if (verbose) Serial.printf("[ESPFileUpdater: %s] [Complete] File downloaded.\n", localPath.c_str());
+
+  // No maxAge means no .meta file is tracked for this file (see README).
+  if (maxAge.length() == 0) {
+    return UPDATED;
+  }
+
   if (newHash == "") {
     File localFile = _fs.open(localPath, FILE_READ);
+    if (!localFile) {
+      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Cannot hash installed file. .meta file not written.\n", localPath.c_str());
+      return UPDATED;
+    }
     newHash = calculateFileHash(localFile);
     localFile.close();
   }
-  newLastModified = String((uint32_t)time(nullptr));
-  if (verbose) Serial.printf("[ESPFileUpdater: %s] [Complete] File downloaded.\n", localPath.c_str());
-  writeMeta(metaPath(localPath), remoteURL, newLastModified, newHash);
 
-  http.end();
+  newLastModified = String((uint32_t)time(nullptr));
+
+  // The .meta file is written only now, after the destination holds a verified,
+  // complete file with a confirmed size.
+  if (!writeMeta(metaPath(localPath), remoteURL, newLastModified, newHash, totalBytesWritten)) {
+    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] File updated but .meta file could not be written.\n", localPath.c_str());
+  }
+
   break; // success, exit retry loop
   } // end retry loop (download phase)
 
   return UPDATED;
 }
 
-/// @copydoc ESPFileUpdater::checkAndUpdate(const String&, const String&, const String&, bool)
+/// @copydoc ESPFileUpdater::checkAndUpdate(const String&, const String&, bool)
 ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localPath, const String& remoteURL, bool verbose) {
   return checkAndUpdate(localPath, remoteURL, "", verbose);
 }
@@ -397,6 +384,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
 /// @copydoc ESPFileUpdater::isRemoteFileNewer
 ESPFileUpdater::UpdateStatus ESPFileUpdater::isRemoteFileNewer(const String& localPath, const String& remoteURL,
                                                                const String& lastModified,
+                                                               int32_t remoteSize,
                                                                String& newLastModified,
                                                                String& remoteHash,
                                                                bool verbose) {
@@ -438,24 +426,48 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::isRemoteFileNewer(const String& loc
       return SERVER_ERROR;
     }
 
-    remoteHash = calculateStreamHash(*http.getStreamPtr(), _maxSize);
+    int32_t streamSize = (int32_t)http.getSize();
+    bool chunked = (streamSize < 0);
+    remoteHash = calculateStreamHash(*http.getStreamPtr(), _maxSize, chunked);
     http.end();
 
     File localFile = _fs.open(localPath, FILE_READ);
+    if (!localFile) {
+      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] Local file could not be opened. Forcing download.\n", localPath.c_str());
+      return UPDATED;
+    }
+    size_t localSize = localFile.size();
     String localHash = calculateFileHash(localFile);
     localFile.close();
 
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Local SHA256] %s\n", localPath.c_str(), localHash.c_str());
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Remote SHA256] %s\n", localPath.c_str(), remoteHash.c_str());
+    // Prefer the size reported by the GET, fall back to the HEAD value.
+    int32_t effectiveSize = (streamSize >= 0) ? streamSize : remoteSize;
+
+    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Local SHA256] %s (%u bytes)\n", localPath.c_str(), localHash.c_str(), (unsigned)localSize);
+    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Remote SHA256] %s (%d bytes)\n", localPath.c_str(), remoteHash.c_str(), (int)effectiveSize);
+
+    if (effectiveSize >= 0 && (size_t)effectiveSize != localSize) {
+      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Check] File sizes differ. Update required.\n", localPath.c_str());
+      return UPDATED;
+    }
+
+    // A hash of only the first _maxSize bytes cannot prove that two larger files are
+    // identical, so never report "not modified" when the comparison window is short.
+    if (remoteHash.length() == 0 || effectiveSize < 0 || (size_t)effectiveSize > _maxSize) {
+      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Check] Cannot verify with the %u byte hashing window. Update required.\n",
+                                  localPath.c_str(), (unsigned)_maxSize);
+      return UPDATED;
+    }
 
     if (localHash != remoteHash) {
       return UPDATED;
     } else {
-      // Update .meta file with current time and hash
+      // Update .meta file with current time, verified size and hash
       time_t now = time(nullptr);
       String nowStr = String((uint32_t)now);
-      String urlStored = readMetaURL(metaPath(localPath));
-      writeMeta(metaPath(localPath), urlStored, nowStr, localHash);
+      String urlStored = readMetaURL(meta);
+      if (urlStored.length() == 0) urlStored = remoteURL;
+      writeMeta(meta, urlStored, nowStr, localHash, localSize);
       if (verbose) Serial.printf("[ESPFileUpdater: %s] [Check] Hashes match, updated .meta file date to now.\n", localPath.c_str());
       return NOT_MODIFIED;
     }
@@ -494,6 +506,18 @@ String ESPFileUpdater::readMetaHash(const String& metaPath) {
   return line;
 }
 
+String ESPFileUpdater::readMetaSize(const String& metaPath) {
+  File meta = _fs.open(metaPath, FILE_READ);
+  if (!meta) return "";
+  meta.readStringUntil('\n'); // skip URL
+  meta.readStringUntil('\n'); // skip Last-Modified
+  meta.readStringUntil('\n'); // skip Hash
+  String line = meta.readStringUntil('\n');
+  meta.close();
+  line.trim();
+  return line;
+}
+
 String ESPFileUpdater::readMetaURL(const String& metaPath) {
   File meta = _fs.open(metaPath, FILE_READ);
   if (!meta) return "";
@@ -503,13 +527,227 @@ String ESPFileUpdater::readMetaURL(const String& metaPath) {
   return line;
 }
 
-bool ESPFileUpdater::writeMeta(const String& metaPath, const String& url, const String& lastModified, const String& sha256) {
+bool ESPFileUpdater::writeMeta(const String& metaPath, const String& url, const String& lastModified,
+                               const String& sha256, size_t fileSize) {
   File meta = _fs.open(metaPath, FILE_WRITE);
   if (!meta) return false;
   meta.println(url);
   meta.println(lastModified);
   meta.println(sha256);
+  meta.println((unsigned long)fileSize);
   meta.close();
+
+  // Read the size back so a partial/failed metadata write is never reported as success.
+  String written = readMetaSize(metaPath);
+  return written.length() > 0 && strtoul(written.c_str(), NULL, 10) == (unsigned long)fileSize;
+}
+
+long ESPFileUpdater::parseChunkSizeLine(const String& line) {
+  String s = line;
+  s.trim();
+  if (s.length() == 0) return -1;
+
+  // Chunk extensions are permitted by RFC 7230 ("1a;ext=value").
+  int semi = s.indexOf(';');
+  if (semi >= 0) s = s.substring(0, semi);
+  s.trim();
+  if (s.length() == 0 || s.length() > 8) return -1;
+
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    bool isHex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+    // Reject anything else (e.g. "0x1f" or decimal text) instead of misparsing it.
+    if (!isHex) return -1;
+  }
+
+  long value = strtol(s.c_str(), NULL, 16);
+  if (value < 0 || value > ESPFILEUPDATER_MAX_CHUNK_SIZE) return -1;
+  return value;
+}
+
+bool ESPFileUpdater::copyBodyToFile(WiFiClient& stream, const String& filePath, bool chunked,
+                                    int32_t contentLength, size_t& bytesWritten,
+                                    bool& storageError, const String& localPath, bool verbose) {
+  bytesWritten = 0;
+  storageError = false;
+
+  File file = _fs.open(filePath, FILE_WRITE);
+  if (!file) {
+    storageError = true;
+    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Cannot open temp file for writing. Aborting.\n", localPath.c_str());
+    return false;
+  }
+
+  const size_t bufSize = (_bufferSize == 0) ? 1024 : _bufferSize;
+  uint8_t* buf = new (std::nothrow) uint8_t[bufSize];
+  if (!buf) {
+    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Failed to allocate buffer (heap: %u)\n", localPath.c_str(), (unsigned)ESP.getFreeHeap());
+    file.close();
+    _fs.remove(filePath);
+    return false;
+  }
+
+  bool writeOk = true;
+  bool terminalChunk = false;
+  uint32_t lastYieldTime = millis();
+
+  if (chunked) {
+    // With no Content-Length the body is usually chunk framed, but a
+    // close-delimited response looks the same to HTTPClient. Probe the first line.
+    String firstLine = stream.readStringUntil('\n');
+    long chunkSize = parseChunkSizeLine(firstLine);
+
+    if (chunkSize < 0) {
+      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] No chunk framing detected, copying body verbatim.\n", localPath.c_str());
+      size_t lineLen = firstLine.length();
+      if (lineLen > 0) {
+        if (file.write((const uint8_t*)firstLine.c_str(), lineLen) != lineLen) {
+          storageError = true;
+          writeOk = false;
+        } else {
+          bytesWritten += lineLen;
+        }
+      }
+      // Only re-add the consumed delimiter when a line was actually probed, so an
+      // empty body does not turn into a one byte file.
+      if (writeOk && lineLen > 0) {
+        if (file.write((const uint8_t*)"\n", 1) != 1) {
+          storageError = true;
+          writeOk = false;
+        } else {
+          bytesWritten += 1;
+        }
+      }
+      chunked = false;
+    } else {
+      while (writeOk) {
+        if (chunkSize == 0) {
+          // Genuine terminal chunk: the only clean end of a chunked body.
+          terminalChunk = true;
+          break;
+        }
+
+        size_t remaining = (size_t)chunkSize;
+        while (remaining > 0 && writeOk) {
+          size_t toRead = (remaining > bufSize) ? bufSize : remaining;
+          size_t got = stream.readBytes(buf, toRead);
+          if (got == 0) { writeOk = false; break; } // truncated mid-chunk
+          if (file.write(buf, got) != got) {
+            storageError = true;
+            writeOk = false;
+            break;
+          }
+          bytesWritten += got;
+          remaining -= got;
+          yieldIfDue(lastYieldTime, _yieldInterval);
+        }
+        if (!writeOk) break;
+
+        // The chunk payload must be terminated by CRLF (a bare LF is tolerated).
+        int c1 = stream.read();
+        if (c1 == '\r') {
+          if (stream.read() != '\n') { writeOk = false; break; }
+        } else if (c1 != '\n') {
+          writeOk = false;
+          break;
+        }
+
+        String sizeLine = stream.readStringUntil('\n');
+        chunkSize = parseChunkSizeLine(sizeLine);
+        if (chunkSize < 0) { writeOk = false; break; }
+      }
+
+      if (!writeOk && verbose) {
+        Serial.printf("[ESPFileUpdater: %s] [Error] Chunked transfer framing invalid or truncated.\n", localPath.c_str());
+      }
+    }
+  }
+
+  if (writeOk && !chunked) {
+    // Either Content-Length is known, or the body is close-delimited: copy until
+    // the peer stops sending. Completeness is checked below.
+    while (true) {
+      size_t got = stream.readBytes(buf, bufSize);
+      if (got == 0) break;
+      if (file.write(buf, got) != got) {
+        storageError = true;
+        writeOk = false;
+        break;
+      }
+      bytesWritten += got;
+      yieldIfDue(lastYieldTime, _yieldInterval);
+    }
+  }
+
+  delete[] buf;
+  file.close();
+
+  if (!writeOk) {
+    _fs.remove(filePath);
+    return false;
+  }
+
+  if (chunked && !terminalChunk) {
+    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Chunked body ended without a terminal chunk.\n", localPath.c_str());
+    _fs.remove(filePath);
+    return false;
+  }
+
+  if (!chunked && contentLength >= 0 && bytesWritten != (size_t)contentLength) {
+    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Body length mismatch: received %u of %d bytes.\n",
+                                localPath.c_str(), (unsigned)bytesWritten, (int)contentLength);
+    _fs.remove(filePath);
+    return false;
+  }
+
+  if (!chunked && contentLength < 0 && verbose) {
+    Serial.printf("[ESPFileUpdater: %s] [Warning] Response has neither Content-Length nor chunk framing; completeness cannot be verified.\n", localPath.c_str());
+  }
+
+  return true;
+}
+
+bool ESPFileUpdater::swapInVerifiedFile(const String& localPath, const String& tmpPath, size_t expectedSize, bool verbose) {
+  String bakPath = localPath + ".bak";
+  String meta = metaPath(localPath);
+
+  bool hadOldFile = _fs.exists(localPath);
+
+  // Metadata is invalidated first: from here on the .meta file can never describe a
+  // file that is missing or half written.
+  if (_fs.exists(meta)) _fs.remove(meta);
+
+  if (hadOldFile) {
+    if (_fs.exists(bakPath)) _fs.remove(bakPath);
+    if (!_fs.rename(localPath, bakPath)) {
+      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Cannot move existing file aside. Keeping current file.\n", localPath.c_str());
+      _fs.remove(tmpPath);
+      return false;
+    }
+  }
+
+  if (!_fs.rename(tmpPath, localPath)) {
+    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Cannot install downloaded file. Restoring previous file.\n", localPath.c_str());
+    if (hadOldFile) _fs.rename(bakPath, localPath);
+    _fs.remove(tmpPath);
+    return false;
+  }
+
+  // Confirm the installed file is the verified one, not a partial write.
+  File installed = _fs.open(localPath, FILE_READ);
+  bool installedOpened = (bool)installed;
+  size_t installedSize = installedOpened ? installed.size() : 0;
+  if (installedOpened) installed.close();
+
+  if (!installedOpened || installedSize != expectedSize) {
+    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Installed file is invalid (%u of %u bytes). Restoring previous file.\n",
+                                localPath.c_str(), (unsigned)installedSize, (unsigned)expectedSize);
+    _fs.remove(localPath);
+    if (hadOldFile) _fs.rename(bakPath, localPath);
+    return false;
+  }
+
+  if (hadOldFile) _fs.remove(bakPath);
   return true;
 }
 
@@ -521,14 +759,13 @@ String ESPFileUpdater::calculateFileHash(File& file) {
   uint8_t buffer[512];
   int len;
   size_t total = 0;
-  while (total < _maxSize && (len = file.read(buffer, sizeof(buffer))) > 0) {
-    size_t toHash = len;
-    if (total + len > _maxSize) {
-      toHash = _maxSize - total;
-    }
-    mbedtls_sha256_update_ret(&ctx, buffer, toHash);
-    total += toHash;
-    if (total >= _maxSize) break;
+  while (total < _maxSize) {
+    size_t toRead = sizeof(buffer);
+    if (total + toRead > _maxSize) toRead = _maxSize - total;
+    len = file.read(buffer, toRead);
+    if (len <= 0) break;
+    mbedtls_sha256_update_ret(&ctx, buffer, len);
+    total += len;
     yield();
   }
 
@@ -536,15 +773,10 @@ String ESPFileUpdater::calculateFileHash(File& file) {
   mbedtls_sha256_finish_ret(&ctx, hash);
   mbedtls_sha256_free(&ctx);
 
-  String result;
-  for (int i = 0; i < 32; i++) {
-    if (hash[i] < 16) result += "0";
-    result += String(hash[i], HEX);
-  }
-  return result;
+  return hashToString(hash);
 }
 
-String ESPFileUpdater::calculateStreamHash(WiFiClient& stream, size_t maxBytes) {
+String ESPFileUpdater::calculateStreamHash(WiFiClient& stream, size_t maxBytes, bool chunked) {
   mbedtls_sha256_context ctx;
   mbedtls_sha256_init(&ctx);
   mbedtls_sha256_starts_ret(&ctx, 0);
@@ -553,104 +785,97 @@ String ESPFileUpdater::calculateStreamHash(WiFiClient& stream, size_t maxBytes) 
   size_t total = 0;
   int len;
 
-  // Detect chunked encoding by reading first line and checking if it's a hex number
-  String firstLine = stream.readStringUntil('\n');
-  String firstLineTrimmed = firstLine;
-  firstLineTrimmed.trim();
+  if (chunked) {
+    // Probe the first line: HTTPClient reports no length for both chunked and
+    // close-delimited bodies.
+    String firstLine = stream.readStringUntil('\n');
+    long chunkSize = parseChunkSizeLine(firstLine);
 
-  char* endPtr;
-  long firstChunkSize = strtol(firstLineTrimmed.c_str(), &endPtr, 16);
-  bool isChunked = (*endPtr == '\0' && firstChunkSize > 0 && firstChunkSize <= 1048576);
-
-  if (isChunked) {
-    // Chunked transfer — hash decoded payload only, skipping chunk framing bytes
-    // Process first chunk
-    size_t bytesLeftInChunk = firstChunkSize;
-    while (total < maxBytes && bytesLeftInChunk > 0) {
-      size_t toRead = (bytesLeftInChunk > sizeof(buffer)) ? sizeof(buffer) : bytesLeftInChunk;
-      if (total + toRead > maxBytes) toRead = maxBytes - total;
-      len = stream.readBytes(buffer, toRead);
-      if (len == 0) break;
-      mbedtls_sha256_update_ret(&ctx, buffer, len);
-      total += len;
-      bytesLeftInChunk -= len;
-      yield();
-    }
-    // Skip any remaining bytes of first chunk beyond maxBytes
-    while (bytesLeftInChunk > 0) {
-      size_t toRead = (bytesLeftInChunk > sizeof(buffer)) ? sizeof(buffer) : bytesLeftInChunk;
-      len = stream.readBytes(buffer, toRead);
-      if (len == 0) break;
-      bytesLeftInChunk -= len;
-    }
-    stream.read(); // CR
-    stream.read(); // LF
-
-    // Process remaining chunks
-    while (total < maxBytes && (stream.connected() || stream.available())) {
-      String chunkSizeLine = stream.readStringUntil('\n');
-      chunkSizeLine.trim();
-      long chunkSize = strtol(chunkSizeLine.c_str(), NULL, 16);
-      if (chunkSize == 0) break; // Last chunk
-
-      bytesLeftInChunk = chunkSize;
-      while (total < maxBytes && bytesLeftInChunk > 0) {
-        size_t toRead = (bytesLeftInChunk > sizeof(buffer)) ? sizeof(buffer) : bytesLeftInChunk;
-        if (total + toRead > maxBytes) toRead = maxBytes - total;
-        len = stream.readBytes(buffer, toRead);
-        if (len == 0) break;
-        mbedtls_sha256_update_ret(&ctx, buffer, len);
-        total += len;
-        bytesLeftInChunk -= len;
-        yield();
+    if (chunkSize < 0) {
+      // Close-delimited body: hash the probed line verbatim and continue raw.
+      size_t firstLineLen = firstLine.length();
+      if (firstLineLen > 0 && total < maxBytes) {
+        size_t toHash = (total + firstLineLen > maxBytes) ? (maxBytes - total) : firstLineLen;
+        mbedtls_sha256_update_ret(&ctx, (const uint8_t*)firstLine.c_str(), toHash);
+        total += toHash;
       }
-      // Skip any remaining bytes of this chunk beyond maxBytes
-      while (bytesLeftInChunk > 0) {
-        size_t toRead = (bytesLeftInChunk > sizeof(buffer)) ? sizeof(buffer) : bytesLeftInChunk;
-        len = stream.readBytes(buffer, toRead);
-        if (len == 0) break;
-        bytesLeftInChunk -= len;
+      // Only hash the consumed delimiter when a line was actually probed.
+      if (firstLineLen > 0 && total < maxBytes) {
+        uint8_t nl = '\n';
+        mbedtls_sha256_update_ret(&ctx, &nl, 1);
+        total++;
       }
-      stream.read(); // CR
-      stream.read(); // LF
-    }
-  } else {
-    // Non-chunked — hash firstLine (untrimmed, binary-safe) + newline, then continue
-    size_t firstLineLen = firstLine.length();
-    if (firstLineLen > 0 && total < maxBytes) {
-      size_t toHash = firstLineLen;
-      if (total + toHash > maxBytes) toHash = maxBytes - total;
-      mbedtls_sha256_update_ret(&ctx, (const uint8_t*)firstLine.c_str(), toHash);
-      total += toHash;
-    }
-    // Hash the newline delimiter that readStringUntil consumed
-    if (total < maxBytes) {
-      uint8_t nl = '\n';
-      mbedtls_sha256_update_ret(&ctx, &nl, 1);
-      total++;
-    }
+      chunked = false;
+    } else {
+      bool framingOk = true;
+      while (framingOk && total < maxBytes) {
+        if (chunkSize == 0) break; // terminal chunk
 
-    // Continue with rest of stream
-    while (total < maxBytes && stream.connected() && (len = stream.readBytes(buffer, sizeof(buffer))) > 0) {
-      size_t toHash = len;
-      if (total + toHash > maxBytes) toHash = maxBytes - total;
-      mbedtls_sha256_update_ret(&ctx, buffer, toHash);
-      total += toHash;
-      if (total >= maxBytes) break;
-      yield();
+        size_t remaining = (size_t)chunkSize;
+        while (remaining > 0 && framingOk && total < maxBytes) {
+          size_t toRead = (remaining > sizeof(buffer)) ? sizeof(buffer) : remaining;
+          if (total + toRead > maxBytes) toRead = maxBytes - total;
+          len = stream.readBytes(buffer, toRead);
+          if (len == 0) { framingOk = false; break; }
+          mbedtls_sha256_update_ret(&ctx, buffer, len);
+          total += len;
+          remaining -= len;
+          yield();
+        }
+
+        // Drain the remainder of a chunk that lies beyond the hashing window.
+        while (remaining > 0) {
+          size_t toRead = (remaining > sizeof(buffer)) ? sizeof(buffer) : remaining;
+          len = stream.readBytes(buffer, toRead);
+          if (len == 0) { framingOk = false; break; }
+          remaining -= len;
+        }
+        if (!framingOk || total >= maxBytes) break;
+
+        // Chunk payloads are terminated by CRLF (a bare LF is tolerated).
+        int c1 = stream.read();
+        if (c1 == '\r') {
+          if (stream.read() != '\n') { framingOk = false; break; }
+        } else if (c1 != '\n') {
+          framingOk = false;
+          break;
+        }
+
+        String sizeLine = stream.readStringUntil('\n');
+        chunkSize = parseChunkSizeLine(sizeLine);
+        if (chunkSize < 0) { framingOk = false; break; }
+      }
+
+      if (!framingOk) {
+        // The hash would describe framing garbage, so report it as unusable and let
+        // the caller fall back to a full download.
+        mbedtls_sha256_free(&ctx);
+        return "";
+      }
+
+      uint8_t hash[32];
+      mbedtls_sha256_finish_ret(&ctx, hash);
+      mbedtls_sha256_free(&ctx);
+      return hashToString(hash);
     }
+  }
+
+  // Raw payload (Content-Length known, or a close-delimited body probed above).
+  while (total < maxBytes) {
+    size_t toRead = sizeof(buffer);
+    if (total + toRead > maxBytes) toRead = maxBytes - total;
+    len = stream.readBytes(buffer, toRead);
+    if (len <= 0) break;
+    mbedtls_sha256_update_ret(&ctx, buffer, len);
+    total += len;
+    yield();
   }
 
   uint8_t hash[32];
   mbedtls_sha256_finish_ret(&ctx, hash);
   mbedtls_sha256_free(&ctx);
 
-  String result;
-  for (int i = 0; i < 32; i++) {
-    if (hash[i] < 16) result += "0";
-    result += String(hash[i], HEX);
-  }
-  return result;
+  return hashToString(hash);
 }
 
 bool ESPFileUpdater::ensureDirExists(const String& path) {
