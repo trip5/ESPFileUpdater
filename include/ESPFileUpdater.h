@@ -1,4 +1,4 @@
-// ESPFileUpdater 1.5.0 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
+// ESPFileUpdater 1.5.1 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
 
 #pragma once
 

@@ -20,7 +20,7 @@ The ESPFileUpdater library provides functionality for checking and updating file
 Your platformio.ini should contain:
 ```
 lib_deps =
-  trip5/ESPFileUpdater@^1.5.0
+  trip5/ESPFileUpdater@^1.5.1
 ```
 
 ### Dependent on Internet, File System, and System Time
@@ -278,6 +278,7 @@ Check the `examples` folder for examples of how to use the ESPFileUpdater librar
 
 | Date       | Version | Release Notes             |
 | ---------- | ------- |-------------------------- |
+| 2026.11.11 | 1.5.1   | Fix `-Waddress` warning in `waitForSystemReadyFS()` |
 | 2026.10.19 | 1.5.0   | Verified downloads: incomplete transfers are rejected, the swap is size-checked with a .bak rollback, and the .meta file is written only after the swap and records the file size |
 | 2026.08.10 | 1.4.2   | Add heap coalesce and reserve so SSL connections always get 40KB contiguous DRAM |
 | 2026.06.29 | 1.4.1   | Fixed edge-case of non-chunked binary file corruption |

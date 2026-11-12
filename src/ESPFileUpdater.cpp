@@ -1,4 +1,4 @@
-// ESPFileUpdater 1.5.0 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
+// ESPFileUpdater 1.5.1 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
 
 #include "ESPFileUpdater.h"
 #include <time.h>
@@ -936,8 +936,7 @@ time_t ESPFileUpdater::parseMetaTime(const String& metaPath) {
 
 bool ESPFileUpdater::waitForSystemReadyFS() {
   uint32_t start = millis();
-  if (&_fs == nullptr) return false;
-  const char* tmpname = "/.fsreadycheck135792468.tmp";
+  const char* tmpname = "/.fsreadycheck1867.tmp";
   while (millis() - start < _timeout) {
     File f = _fs.open(tmpname, FILE_WRITE);
     if (f) {
