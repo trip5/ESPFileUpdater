@@ -1,4 +1,4 @@
-// ESPFileUpdater 1.5.1 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
+// ESPFileUpdater 1.6.0 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
 
 #include "ESPFileUpdater.h"
 #include <time.h>
@@ -8,6 +8,7 @@
 #include <lwip/sockets.h>
 #include <lwip/netdb.h>
 #include <WiFi.h>
+#include <mbedtls/platform.h>   // mbedtls_calloc/free, so the heap gate can ask the allocator TLS will use
 
 // Compatibility for mbedtls_sha256_*_ret functions (for older ESP32 Arduino cores)
 #if !defined(mbedtls_sha256_starts_ret)
@@ -16,12 +17,31 @@
 #define mbedtls_sha256_finish_ret mbedtls_sha256_finish
 #endif
 
-// Minimum free heap required for SSL/TLS connections (in bytes)
-// mbedtls needs ~34-36KB contiguous (16KB in + 16KB out + context). 40KB gives safe margin.
+// Bytes reserved for a TLS handshake while HTTPClient is being set up. The geometry is two record buffers plus the
+// context: 2 * MBEDTLS_SSL_MAX_CONTENT_LEN + ~8KB = 2 * 16384 + 8192 = 40960, so 40000 is that sum, rounded down.
+// Deliberately a constant rather than derived from MBEDTLS_SSL_MAX_CONTENT_LEN: that macro is not exposed by
+// <mbedtls/platform.h>, and on IDF 5.x the record sizes moved to CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN and
+// CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN, so a derivation would be silently wrong on one core generation and right on
+// another. A rounded constant that is right everywhere beats an expression that is only right somewhere.
 #define ESPFILEUPDATER_MIN_HEAP_FOR_SSL 40000
 
 // Largest chunk size accepted while parsing chunked transfer framing (1 MB)
 #define ESPFILEUPDATER_MAX_CHUNK_SIZE 1048576
+
+// Names derived from the path the caller supplies.  One character each, because every character spent here is a
+// character the file system will not give back (SPIFFS and ESP8266 LittleFS allow 31):
+//   "!"  metadata - date-stamp, hash and size, one per tracked file
+//   "$"  the in-flight download
+//   "~"  the previous file held aside during the swap
+#define ESPFILEUPDATER_SUFFIX_META "!"
+#define ESPFILEUPDATER_SUFFIX_TMP  "$"
+#define ESPFILEUPDATER_SUFFIX_BAK  "~"
+
+// Suffixes used up to 1.5.x.  Nothing reads or writes these any more: a leftover is either from an interrupted
+// attempt or from an older version, and both are swept away before a download starts.
+#define ESPFILEUPDATER_LEGACY_META ".meta"
+#define ESPFILEUPDATER_LEGACY_TMP  ".tmp"
+#define ESPFILEUPDATER_LEGACY_BAK  ".bak"
 
 ESPFileUpdater::ESPFileUpdater(fs::FS& fs) : _fs(fs) {}
 
@@ -43,21 +63,57 @@ static void yieldIfDue(uint32_t& lastYieldTime, uint32_t interval) {
   }
 }
 
-// Check if sufficient heap is available for an SSL connection.
-// Returns true if OK, false if heap critically low.
-// NOTE: The caller is responsible for holding a contiguous reserve block
-// (malloc + hold through setup + free immediately before SSL handshake)
-// to prevent the audio task from fragmenting the heap between check and use.
+// Check if enough memory is available for an SSL connection.
+// Returns true if OK, false if memory is critically short.
+//
+// This used to be `ESP.getFreeHeap() < ESPFILEUPDATER_MIN_HEAP_FOR_SSL`, which is the wrong question twice over.  Total
+// free bytes say nothing about the largest contiguous piece, and a handshake fails on the largest piece.  Worse, the
+// pool the floor referred to depends on how mbedTLS was built: Arduino ships it on internal DRAM
+// (CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC), while an mbedTLS rebuilt with CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC takes the same
+// buffers from PSRAM.  Those are very different amounts of room, and no version check can see a rebuilt archive - so
+// this asks the allocator instead of naming a pool.  mbedtls_calloc is the same entry point either way.
+//
+// The three blocks are held simultaneously because fragmentation, not the total, is what fails a handshake.  On a board
+// with no PSRAM, or on a core whose mbedTLS allocates internally, this simply probes internal DRAM - the same answer the
+// old test was approximating, measured instead of guessed.
+//
+// The probe above only predicts. A concurrent task (audio streaming, for instance) can still fragment the heap
+// between the probe and the handshake, so each call site takes a reserve of ESPFILEUPDATER_MIN_HEAP_FOR_SSL with
+// malloc(), holds it through HTTPClient setup, and frees it immediately before the handshake so mbedTLS can claim
+// exactly that block. The protection covers that window only; nothing is held for the life of the object.
+#if defined(MBEDTLS_PLATFORM_MEMORY)
+static bool checkHeapForSSL(const String& localPath, bool verbose) {
+    void* in  = mbedtls_calloc(1, 16384);
+    void* out = mbedtls_calloc(1, 16384);
+    void* ctx = mbedtls_calloc(1, 8192);
+    const bool ok = (in != nullptr && out != nullptr && ctx != nullptr);
+    if (!ok) {
+        // Always logged: the caller only sees OUT_OF_MEMORY, which says nothing about which buffer was
+        // refused.  Naming the one that failed is the difference between a report that can be acted on
+        // and one that cannot.
+        Serial.printf("[ESPFileUpdater: %s] [Error] Not enough memory for a TLS handshake (16K in %s, 16K out %s, 8K ctx %s)\n",
+            localPath.c_str(), in ? "ok" : "fail", out ? "ok" : "fail", ctx ? "ok" : "fail");
+    } else if (verbose) {
+        Serial.printf("[ESPFileUpdater: %s] [Heap] Room for a TLS handshake (16K in, 16K out, 8K ctx)\n", localPath.c_str());
+    }
+    if (in)  mbedtls_free(in);
+    if (out) mbedtls_free(out);
+    if (ctx) mbedtls_free(ctx);
+    return ok;
+}
+#else
+// No MBEDTLS_PLATFORM_MEMORY to probe through: keep the original total-heap test.
 static bool checkHeapForSSL(const String& localPath, bool verbose) {
     uint32_t freeHeap = ESP.getFreeHeap();
     if (freeHeap < ESPFILEUPDATER_MIN_HEAP_FOR_SSL) {
-        if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Insufficient heap (%u bytes, need %d). Aborting.\n",
+        Serial.printf("[ESPFileUpdater: %s] [Error] Insufficient heap (%u bytes, need %d). Aborting.\n",
             localPath.c_str(), (unsigned)freeHeap, ESPFILEUPDATER_MIN_HEAP_FOR_SSL);
         return false;
     }
     if (verbose) Serial.printf("[ESPFileUpdater: %s] [Heap] Free heap: %u bytes\n", localPath.c_str(), (unsigned)freeHeap);
     return true;
 }
+#endif
 
 /// @copydoc ESPFileUpdater::checkAndUpdate(const String&, const String&, const String&, bool)
 ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localPath, const String& remoteURL, const String& maxAge, bool verbose) {
@@ -71,7 +127,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
   }
 
   if (waitForSystemReadyFS()==false) {
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] File system not ready. Aborting update.\n", localPath.c_str());
+    Serial.printf("[ESPFileUpdater: %s] [Error] File system not ready. Aborting update.\n", localPath.c_str());
     return FS_ERROR;
   }
 
@@ -83,18 +139,18 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
     ForceUpdate = true;
   } else {
     if (waitForSystemReadyTime()==false) {
-      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] System time not set. Aborting update.", localPath.c_str());
+      Serial.printf("[ESPFileUpdater: %s] [Error] System time not set. Aborting update.\n", localPath.c_str());
       return TIME_ERROR;
     }
-    // check .meta file if URL has changed
+    // check the metadata file if the URL has changed
     if (_fs.exists(meta)) {
       String storedURL = readMetaURL(meta);
       if (storedURL.length() > 0 && storedURL != remoteURL) {
         if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] Source URL changed. Forcing re-download.\n", localPath.c_str());
         ForceUpdate = true;
       } else {
-        // A .meta file must never outlive the file it describes. If the recorded size
-        // no longer matches the file on disk, the .meta is stale and is discarded.
+        // The metadata file must never outlive the file it describes. If the recorded
+        // size no longer matches the file on disk, the metadata is stale and is discarded.
         String storedSize = readMetaSize(meta);
         if (storedSize.length() > 0) {
           File localFile = _fs.open(localPath, FILE_READ);
@@ -103,7 +159,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
           if (haveLocalFile) localFile.close();
           unsigned long metaSize = strtoul(storedSize.c_str(), NULL, 10);
           if (!haveLocalFile || (size_t)metaSize != localSize) {
-            if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] .meta size (%lu) does not match local size (%u). Discarding .meta and forcing re-download.\n",
+            if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] Recorded size (%lu) does not match local size (%u). Discarding metadata and forcing re-download.\n",
                                         localPath.c_str(), metaSize, (unsigned)localSize);
             _fs.remove(meta);
             ForceUpdate = true;
@@ -114,7 +170,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
   }
 
   if (ForceUpdate == false) {
-    // check .meta file and maxAge
+    // check the metadata file and maxAge
     time_t now = time(nullptr);
     if (maxAge.length() > 0 && _fs.exists(meta)) {
       time_t metaTime = parseMetaTime(meta);
@@ -125,7 +181,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
       if (verbose) Serial.printf("[ESPFileUpdater: %s] Current time: %s\n", localPath.c_str(), nowStr);
       char metaTimeStr[32];
       strftime(metaTimeStr, sizeof(metaTimeStr), "%Y-%m-%d %H:%M:%S", localtime(&metaTime));
-      if (verbose) Serial.printf("[ESPFileUpdater: %s] .meta file time: %s\n", localPath.c_str(), metaTimeStr);
+      if (verbose) Serial.printf("[ESPFileUpdater: %s] Metadata time: %s\n", localPath.c_str(), metaTimeStr);
 
       if (metaTime > 0 && interval > 0 && (now < metaTime + interval)) {
         if (verbose) Serial.printf("[ESPFileUpdater: %s] [Info] Skipping update: max age (%s) not reached.\n", localPath.c_str(), maxAge.c_str());
@@ -135,7 +191,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
 
     if (verbose) Serial.printf("[ESPFileUpdater: %s] [Check] Connecting to %s\n", localPath.c_str(), remoteURL.c_str());
     if (waitForSystemReadyNetwork()==false) {
-      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Network connection not ready. Aborting.\n", localPath.c_str());
+      Serial.printf("[ESPFileUpdater: %s] [Error] Network connection not ready. Aborting.\n", localPath.c_str());
       return NETWORK_ERROR;
     }
 
@@ -161,7 +217,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
     // Allocate contiguous heap reserve to prevent fragmentation
     void* sslReserve = malloc(ESPFILEUPDATER_MIN_HEAP_FOR_SSL);
     if (!sslReserve) {
-      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Failed to reserve %d bytes for SSL (heap: %u)\n",
+      Serial.printf("[ESPFileUpdater: %s] [Error] Failed to reserve %d bytes for SSL (heap: %u)\n",
           localPath.c_str(), ESPFILEUPDATER_MIN_HEAP_FOR_SSL, (unsigned)ESP.getFreeHeap());
       return OUT_OF_MEMORY;
     }
@@ -185,7 +241,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
     int httpCode = http.sendRequest("HEAD");
 
     if (httpCode <= 0) {
-      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Server unreachable.\n", localPath.c_str());
+      Serial.printf("[ESPFileUpdater: %s] [Error] Server unreachable.\n", localPath.c_str());
       http.end();
       if (attempt < _retryCount) continue; // retry on transient failure
       return SERVER_ERROR;
@@ -212,12 +268,12 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
         return NOT_MODIFIED; // definitive answer, no retry needed
       }
       if (status == FILE_NOT_FOUND) {
-        if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] File not found. Aborting.\n", localPath.c_str());
+        Serial.printf("[ESPFileUpdater: %s] [Error] File not found. Aborting.\n", localPath.c_str());
         http.end();
         return FILE_NOT_FOUND; // definitive answer, no retry needed
       }
       if (status == SERVER_ERROR) {
-        if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Server error. Aborting.\n", localPath.c_str());
+        Serial.printf("[ESPFileUpdater: %s] [Error] Server error. Aborting.\n", localPath.c_str());
         http.end();
         if (attempt < _retryCount) continue; // retry on transient failure
         return SERVER_ERROR;
@@ -234,7 +290,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
   } // end else (ForceUpdate == false)
 
   if (waitForSystemReadyNetwork()==false) {
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Network connection not ready. Aborting.\n", localPath.c_str());
+    Serial.printf("[ESPFileUpdater: %s] [Error] Network connection not ready. Aborting.\n", localPath.c_str());
     return NETWORK_ERROR;
   }
 
@@ -259,7 +315,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
   // Allocate contiguous heap reserve to prevent fragmentation
   void* sslReserve = malloc(ESPFILEUPDATER_MIN_HEAP_FOR_SSL);
   if (!sslReserve) {
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Failed to reserve %d bytes for SSL (heap: %u)\n",
+    Serial.printf("[ESPFileUpdater: %s] [Error] Failed to reserve %d bytes for SSL (heap: %u)\n",
         localPath.c_str(), ESPFILEUPDATER_MIN_HEAP_FOR_SSL, (unsigned)ESP.getFreeHeap());
     return OUT_OF_MEMORY;
   }
@@ -282,21 +338,33 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
 
   int getCode = http.GET();
   if (getCode != HTTP_CODE_OK) {
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] GET failed. HTTP code: %d. Aborting.\n", localPath.c_str(), getCode);
+    Serial.printf("[ESPFileUpdater: %s] [Error] GET failed. HTTP code: %d. Aborting.\n", localPath.c_str(), getCode);
     http.end();
     if (attempt < _retryCount) continue; // retry on transient failure
     return SERVER_ERROR;
   }
 
-  ensureDirExists(localPath);
+  String tmpPath = localPath + ESPFILEUPDATER_SUFFIX_TMP;
 
-  String tmpPath = localPath + ".tmp";
-  String bakPath = localPath + ".bak";
+  if (!ensureDirExists(localPath)) {
+    Serial.printf("[ESPFileUpdater: %s] [Error] Cannot create the directory for this file. Aborting.\n", localPath.c_str());
+    http.end();
+    return FS_ERROR;
+  }
 
-  // Discard leftovers from an interrupted attempt. A stale .tmp must never be
-  // mistaken for a completed transfer.
-  if (_fs.exists(tmpPath)) _fs.remove(tmpPath);
-  if (_fs.exists(bakPath)) _fs.remove(bakPath);
+  // Discard leftovers from an interrupted attempt, under the current names and under the ones 1.5 and earlier
+  // used. A stale temp file must never be mistaken for a completed transfer, and a legacy metadata file records a
+  // date-stamp this version will not read, so it is garbage - at the price of one download, which is happening
+  // anyway. The current metadata file is deliberately not touched here: the swap invalidates it at the exact
+  // moment it must.
+  static const char* const leftovers[] = {
+    ESPFILEUPDATER_SUFFIX_TMP, ESPFILEUPDATER_SUFFIX_BAK,
+    ESPFILEUPDATER_LEGACY_TMP, ESPFILEUPDATER_LEGACY_BAK, ESPFILEUPDATER_LEGACY_META
+  };
+  for (size_t i = 0; i < sizeof(leftovers) / sizeof(leftovers[0]); i++) {
+    const String stale = localPath + leftovers[i];
+    if (_fs.exists(stale)) _fs.remove(stale);
+  }
 
   // HTTPClient reports -1 when there is no Content-Length (chunked or
   // close-delimited), in which case the body framing is validated while streaming.
@@ -313,7 +381,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
 
   if (!copyBodyToFile(*stream, tmpPath, chunkedBody, expectedSize,
                       totalBytesWritten, storageError, localPath, verbose)) {
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Incomplete download (%u bytes received). Partial file discarded.\n",
+    Serial.printf("[ESPFileUpdater: %s] [Error] Incomplete download (%u bytes received). Partial file discarded.\n",
                                 localPath.c_str(), (unsigned)totalBytesWritten);
     http.end();
     if (attempt < _retryCount && !storageError) continue; // retry interrupted transfers
@@ -330,7 +398,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
   size_t stagedSize = stagedOpened ? staged.size() : 0;
   if (stagedOpened) staged.close();
   if (!stagedOpened || stagedSize != totalBytesWritten) {
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Temp file verification failed (%u bytes on flash, %u received). Aborting.\n",
+    Serial.printf("[ESPFileUpdater: %s] [Error] Temp file verification failed (%u bytes on flash, %u received). Aborting.\n",
                                 localPath.c_str(), (unsigned)stagedSize, (unsigned)totalBytesWritten);
     _fs.remove(tmpPath);
     http.end();
@@ -339,7 +407,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
 
   http.end();
 
-  // The .meta file is invalidated inside the swap, immediately before the old file
+  // The metadata file is invalidated inside the swap, immediately before the old file
   // is moved aside, so it can never describe a missing or partial file.
   if (!swapInVerifiedFile(localPath, tmpPath, totalBytesWritten, verbose)) {
     return FS_ERROR;
@@ -347,7 +415,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
 
   if (verbose) Serial.printf("[ESPFileUpdater: %s] [Complete] File downloaded.\n", localPath.c_str());
 
-  // No maxAge means no .meta file is tracked for this file (see README).
+  // No maxAge means no metadata file is tracked for this file (see README).
   if (maxAge.length() == 0) {
     return UPDATED;
   }
@@ -355,7 +423,9 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
   if (newHash == "") {
     File localFile = _fs.open(localPath, FILE_READ);
     if (!localFile) {
-      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Cannot hash installed file. .meta file not written.\n", localPath.c_str());
+      // Always logged: without a metadata file there is no date-stamp to compare, so every later call
+      // re-downloads a file that is already correct.
+      Serial.printf("[ESPFileUpdater: %s] [Error] Cannot hash installed file. Metadata not written, so the next check will re-download it.\n", localPath.c_str());
       return UPDATED;
     }
     newHash = calculateFileHash(localFile);
@@ -364,10 +434,15 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::checkAndUpdate(const String& localP
 
   newLastModified = String((uint32_t)time(nullptr));
 
-  // The .meta file is written only now, after the destination holds a verified,
+  // The metadata file is written only now, after the destination holds a verified,
   // complete file with a confirmed size.
   if (!writeMeta(metaPath(localPath), remoteURL, newLastModified, newHash, totalBytesWritten)) {
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] File updated but .meta file could not be written.\n", localPath.c_str());
+    // Always logged, and never silent: the file itself is fine, but without a metadata file there is no
+    // date-stamp to compare, so every later call re-downloads it.  The usual causes are a full file system
+    // or a name the file system will not accept.
+    Serial.printf("[ESPFileUpdater: %s] [Error] File updated but metadata file \"%s\" could not be written. "
+                  "Next check will re-download it. Check free space and the file name limit.\n",
+                  localPath.c_str(), meta.c_str());
   }
 
   break; // success, exit retry loop
@@ -462,13 +537,13 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::isRemoteFileNewer(const String& loc
     if (localHash != remoteHash) {
       return UPDATED;
     } else {
-      // Update .meta file with current time, verified size and hash
+      // Refresh the metadata file with the current time, verified size and hash
       time_t now = time(nullptr);
       String nowStr = String((uint32_t)now);
       String urlStored = readMetaURL(meta);
       if (urlStored.length() == 0) urlStored = remoteURL;
       writeMeta(meta, urlStored, nowStr, localHash, localSize);
-      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Check] Hashes match, updated .meta file date to now.\n", localPath.c_str());
+      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Check] Hashes match, refreshed the metadata date to now.\n", localPath.c_str());
       return NOT_MODIFIED;
     }
   }
@@ -482,7 +557,7 @@ ESPFileUpdater::UpdateStatus ESPFileUpdater::isRemoteFileNewer(const String& loc
 }
 
 String ESPFileUpdater::metaPath(const String& filePath) {
-  return filePath + ".meta";
+  return filePath + ESPFILEUPDATER_SUFFIX_META;
 }
 
 String ESPFileUpdater::readMetaLastModified(const String& metaPath) {
@@ -565,6 +640,55 @@ long ESPFileUpdater::parseChunkSizeLine(const String& line) {
   return value;
 }
 
+// A short read is NOT the end of the body: the socket can simply have nothing ready yet, and Stream::readBytes()
+// returns early whenever its own timeout fires.  These helpers retry against setReadDeadline() instead: the total
+// wait within a chunk may be long, but a peer that closes is still honoured as the end.
+
+// Read up to len bytes, retrying while the socket is still connected, giving up only on the deadline.
+// Returns what it actually got; 0 means the peer closed or the deadline expired.
+static size_t readWithDeadline(WiFiClient& stream, uint8_t* buf, size_t len, uint32_t deadlineMs) {
+  size_t total = 0;
+  const uint32_t start = millis();
+  while (total < len) {
+    const size_t got = stream.readBytes(buf + total, len - total);
+    total += got;
+    if (total >= len) break;
+    if (!stream.connected() && stream.available() == 0) break;   // peer closed: a real truncation
+    if (millis() - start >= deadlineMs) break;
+    delay(1);                                                    // let other tasks run while we wait
+  }
+  return total;
+}
+
+// Same idea for one CRLF: returns the byte read, or -1 when none arrived before the deadline or the peer closed.
+static int readByteWithDeadline(WiFiClient& stream, uint32_t deadlineMs) {
+  const uint32_t start = millis();
+  while (millis() - start < deadlineMs) {
+    const int c = stream.read();
+    if (c >= 0) return c;
+    if (!stream.connected()) return -1;
+    delay(1);
+  }
+  return -1;
+}
+
+// Same idea for a chunk-size line: collect until LF, or give up on the deadline.
+static String readLineWithDeadline(WiFiClient& stream, uint32_t deadlineMs) {
+  String line;
+  const uint32_t start = millis();
+  while (millis() - start < deadlineMs) {
+    const int c = stream.read();
+    if (c < 0) {
+      if (!stream.connected()) break;
+      delay(1);
+      continue;
+    }
+    if (c == '\n') { line.trim(); return line; }
+    if (line.length() < 64) line += (char)c;   // a chunk-size line is short; guard a runaway
+  }
+  return String();
+}
+
 bool ESPFileUpdater::copyBodyToFile(WiFiClient& stream, const String& filePath, bool chunked,
                                     int32_t contentLength, size_t& bytesWritten,
                                     bool& storageError, const String& localPath, bool verbose) {
@@ -574,14 +698,19 @@ bool ESPFileUpdater::copyBodyToFile(WiFiClient& stream, const String& filePath, 
   File file = _fs.open(filePath, FILE_WRITE);
   if (!file) {
     storageError = true;
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Cannot open temp file for writing. Aborting.\n", localPath.c_str());
+    // Always logged: on SPIFFS and on ESP8266 LittleFS this is exactly where a name that is too long for
+    // the file system surfaces, because the derived character is appended to a name that may already be at
+    // the limit.
+    Serial.printf("[ESPFileUpdater: %s] [Error] Cannot open \"%s\" for writing. Aborting. "
+                  "Check free space and the file name limit (see README, File System Limitations).\n",
+                  localPath.c_str(), filePath.c_str());
     return false;
   }
 
   const size_t bufSize = (_bufferSize == 0) ? 1024 : _bufferSize;
   uint8_t* buf = new (std::nothrow) uint8_t[bufSize];
   if (!buf) {
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Failed to allocate buffer (heap: %u)\n", localPath.c_str(), (unsigned)ESP.getFreeHeap());
+    Serial.printf("[ESPFileUpdater: %s] [Error] Failed to allocate buffer (heap: %u)\n", localPath.c_str(), (unsigned)ESP.getFreeHeap());
     file.close();
     _fs.remove(filePath);
     return false;
@@ -589,6 +718,7 @@ bool ESPFileUpdater::copyBodyToFile(WiFiClient& stream, const String& filePath, 
 
   bool writeOk = true;
   bool terminalChunk = false;
+  const char* failStage = nullptr;   // which step of the chunk framing gave up, so the error can name it
   uint32_t lastYieldTime = millis();
 
   if (chunked) {
@@ -630,11 +760,12 @@ bool ESPFileUpdater::copyBodyToFile(WiFiClient& stream, const String& filePath, 
         size_t remaining = (size_t)chunkSize;
         while (remaining > 0 && writeOk) {
           size_t toRead = (remaining > bufSize) ? bufSize : remaining;
-          size_t got = stream.readBytes(buf, toRead);
-          if (got == 0) { writeOk = false; break; } // truncated mid-chunk
+          size_t got = readWithDeadline(stream, buf, toRead, _readDeadlineMs);
+          if (got == 0) { writeOk = false; failStage = "chunk data"; break; }
           if (file.write(buf, got) != got) {
             storageError = true;
             writeOk = false;
+            failStage = "writing to the file";
             break;
           }
           bytesWritten += got;
@@ -644,21 +775,26 @@ bool ESPFileUpdater::copyBodyToFile(WiFiClient& stream, const String& filePath, 
         if (!writeOk) break;
 
         // The chunk payload must be terminated by CRLF (a bare LF is tolerated).
-        int c1 = stream.read();
+        int c1 = readByteWithDeadline(stream, _readDeadlineMs);
         if (c1 == '\r') {
-          if (stream.read() != '\n') { writeOk = false; break; }
+          if (readByteWithDeadline(stream, _readDeadlineMs) != '\n') { writeOk = false; failStage = "chunk terminator"; break; }
         } else if (c1 != '\n') {
           writeOk = false;
+          failStage = "chunk terminator";
           break;
         }
 
-        String sizeLine = stream.readStringUntil('\n');
+        String sizeLine = readLineWithDeadline(stream, _readDeadlineMs);
         chunkSize = parseChunkSizeLine(sizeLine);
-        if (chunkSize < 0) { writeOk = false; break; }
+        if (chunkSize < 0) { writeOk = false; failStage = "chunk size line"; break; }
       }
 
       if (!writeOk && verbose) {
-        Serial.printf("[ESPFileUpdater: %s] [Error] Chunked transfer framing invalid or truncated.\n", localPath.c_str());
+        // Name the stage and the state: "chunk data" with connected=1 means the socket is alive and simply had nothing
+        // to give within the deadline, which is a stall to retry; connected=0 is a real truncation.
+        Serial.printf("[ESPFileUpdater: %s] [Error] Chunked framing failed at %s after %u bytes (connected %d, %u ms deadline).\n",
+            localPath.c_str(), failStage ? failStage : "unknown stage", (unsigned)bytesWritten,
+            stream.connected() ? 1 : 0, (unsigned)_readDeadlineMs);
       }
     }
   }
@@ -688,13 +824,13 @@ bool ESPFileUpdater::copyBodyToFile(WiFiClient& stream, const String& filePath, 
   }
 
   if (chunked && !terminalChunk) {
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Chunked body ended without a terminal chunk.\n", localPath.c_str());
+    Serial.printf("[ESPFileUpdater: %s] [Error] Chunked body ended without a terminal chunk.\n", localPath.c_str());
     _fs.remove(filePath);
     return false;
   }
 
   if (!chunked && contentLength >= 0 && bytesWritten != (size_t)contentLength) {
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Body length mismatch: received %u of %d bytes.\n",
+    Serial.printf("[ESPFileUpdater: %s] [Error] Body length mismatch: received %u of %d bytes.\n",
                                 localPath.c_str(), (unsigned)bytesWritten, (int)contentLength);
     _fs.remove(filePath);
     return false;
@@ -708,26 +844,26 @@ bool ESPFileUpdater::copyBodyToFile(WiFiClient& stream, const String& filePath, 
 }
 
 bool ESPFileUpdater::swapInVerifiedFile(const String& localPath, const String& tmpPath, size_t expectedSize, bool verbose) {
-  String bakPath = localPath + ".bak";
+  String bakPath = localPath + ESPFILEUPDATER_SUFFIX_BAK;
   String meta = metaPath(localPath);
 
   bool hadOldFile = _fs.exists(localPath);
 
-  // Metadata is invalidated first: from here on the .meta file can never describe a
+  // Metadata is invalidated first: from here on the metadata file can never describe a
   // file that is missing or half written.
   if (_fs.exists(meta)) _fs.remove(meta);
 
   if (hadOldFile) {
     if (_fs.exists(bakPath)) _fs.remove(bakPath);
     if (!_fs.rename(localPath, bakPath)) {
-      if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Cannot move existing file aside. Keeping current file.\n", localPath.c_str());
+      Serial.printf("[ESPFileUpdater: %s] [Error] Cannot move existing file aside. Keeping current file.\n", localPath.c_str());
       _fs.remove(tmpPath);
       return false;
     }
   }
 
   if (!_fs.rename(tmpPath, localPath)) {
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Cannot install downloaded file. Restoring previous file.\n", localPath.c_str());
+    Serial.printf("[ESPFileUpdater: %s] [Error] Cannot install downloaded file. Restoring previous file.\n", localPath.c_str());
     if (hadOldFile) _fs.rename(bakPath, localPath);
     _fs.remove(tmpPath);
     return false;
@@ -740,7 +876,7 @@ bool ESPFileUpdater::swapInVerifiedFile(const String& localPath, const String& t
   if (installedOpened) installed.close();
 
   if (!installedOpened || installedSize != expectedSize) {
-    if (verbose) Serial.printf("[ESPFileUpdater: %s] [Error] Installed file is invalid (%u of %u bytes). Restoring previous file.\n",
+    Serial.printf("[ESPFileUpdater: %s] [Error] Installed file is invalid (%u of %u bytes). Restoring previous file.\n",
                                 localPath.c_str(), (unsigned)installedSize, (unsigned)expectedSize);
     _fs.remove(localPath);
     if (hadOldFile) _fs.rename(bakPath, localPath);
@@ -883,10 +1019,19 @@ bool ESPFileUpdater::ensureDirExists(const String& path) {
   if (lastSlash <= 0) return true;
 
   String dir = path.substring(0, lastSlash);
-  if (!_fs.exists(dir)) {
-    return _fs.mkdir(dir);
+  if (_fs.exists(dir)) return true;
+
+  // LittleFS keeps real directories: "/a/b" cannot be created before "/a" exists.  SPIFFS makes its
+  // (cosmetic) directories up on demand, so only LittleFS ever needed this - but creating one level at
+  // a time costs one exists() per level and makes both file systems behave the same way.
+  int idx = 0;
+  while ((idx = dir.indexOf('/', idx + 1)) >= 0) {
+    const String level = dir.substring(0, idx);
+    if (level.length() > 1 && !_fs.exists(level) && !_fs.mkdir(level)) return false;
   }
-  return true;
+
+  if (_fs.exists(dir)) return true;
+  return _fs.mkdir(dir);
 }
 
 time_t ESPFileUpdater::parseMaxAge(const String& maxAgeStr) {
@@ -936,7 +1081,7 @@ time_t ESPFileUpdater::parseMetaTime(const String& metaPath) {
 
 bool ESPFileUpdater::waitForSystemReadyFS() {
   uint32_t start = millis();
-  const char* tmpname = "/.fsreadycheck1867.tmp";
+  const char* tmpname = "/.fsreadycheck135792468.tmp";
   while (millis() - start < _timeout) {
     File f = _fs.open(tmpname, FILE_WRITE);
     if (f) {

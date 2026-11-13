@@ -1,4 +1,4 @@
-// ESPFileUpdater 1.5.1 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
+// ESPFileUpdater 1.6.0 -- Created by Trip5 : https://github.com/trip5/ESPFileUpdater
 
 #pragma once
 
@@ -14,6 +14,14 @@
 #endif
 
 /// @brief Class for updating files on ESP devices from a remote HTTP source.
+///
+/// Names derived from the local path, one character each so the caller's name keeps as much of the file
+/// system limit as possible (SPIFFS and ESP8266 LittleFS allow 31 characters):
+///   <path>!  metadata: date-stamp, hash and size, one per tracked file
+///   <path>$  the in-flight download
+///   <path>~  the previous file, held aside only during the swap
+/// Leftovers under these names, and under the ".meta", ".tmp" and ".bak" names used up to 1.5.x, are removed
+/// before a download starts.
 class ESPFileUpdater {
 public:
 
@@ -24,6 +32,7 @@ public:
   void setInsecure(bool insecure)     { _insecure = insecure; }
   void setBuffer(size_t bytes)        { _bufferSize = bytes; }
   void setYieldInterval(uint32_t ms)  { _yieldInterval = ms; }
+  void setReadDeadline(uint32_t ms)   { _readDeadlineMs = ms; }
   void setRetryCount(uint8_t count)   { _retryCount = count; }
   void setRetryDelay(uint32_t ms)     { _retryDelay = ms; }
 
@@ -49,14 +58,14 @@ public:
   /// @param localPath Path to the local file.
   /// @param remoteURL URL of the remote file.
   /// @param maxAge Optional: max age string (e.g., "12h", "5 days", "2weeks", "1 month" - may be specified as abbreviations: h, hr, d, wk, w, mo, m)
-  /// @param verbose Optional: enable verbose logging.
+  /// @param verbose Optional: enable verbose logging.  Errors that end an update are logged whether this is set or not.
   /// @return UpdateStatus indicating the result.
   UpdateStatus checkAndUpdate(const String& localPath, const String& remoteURL, const String& maxAge = "", bool verbose = false);
 
   /// @brief Check and update a file from a remote URL, with verbose logging.
   /// @param localPath Path to the local file.
   /// @param remoteURL URL of the remote file.
-  /// @param verbose Enable verbose logging.
+  /// @param verbose Enable verbose logging.  Errors that end an update are logged whether this is set or not.
   /// @return UpdateStatus indicating the result.
   UpdateStatus checkAndUpdate(const String& localPath, const String& remoteURL, bool verbose);
 
@@ -67,10 +76,11 @@ private:
   bool     _insecure      = false;     // insecure mode enabled
   size_t   _bufferSize    = 2048;      // buffer size for reading/writing during downloads
   uint32_t _yieldInterval = 20;        // yield every X milliseconds (time-based for consistent responsiveness)
+  uint32_t _readDeadlineMs = 15000;    // total wait allowed within one chunk before the body is called truncated
   uint8_t  _retryCount    = 2;         // number of retries on transient failures
   uint32_t _retryDelay    = 2000;      // delay between retries in ms
                                        // the browser / agent to report to servers
-  String   _userAgent = "ESPFileUpdater/1.5.0 (https://github.com/trip5/ESPFileUpdater)";
+  String   _userAgent = "ESPFileUpdater/1.6.0 (https://github.com/trip5/ESPFileUpdater)";
 
 
   /// @brief Wait until the filesystem is ready (SPIFFS mounted).
@@ -92,33 +102,33 @@ private:
   /// @return true if ready, false if timeout.
   bool waitForSystemReadyNetwork();
 
-  /// @brief Get the path to the .meta file for a given file.
+  /// @brief Get the metadata file path for a given file: the local path with "!" appended.
   /// @param filePath Path to the local file.
-  /// @return Path to the .meta file.
+  /// @return Path to the metadata file.
   String metaPath(const String& filePath);
 
-  /// @brief Read the last-modified value from the .meta file.
-  /// @param metaPath Path to the .meta file.
+  /// @brief Read the last-modified value from the metadata file.
+  /// @param metaPath Path to the metadata file.
   /// @return Last-modified string.
   String readMetaLastModified(const String& metaPath);
 
-  /// @brief Read the hash value from the .meta file.
-  /// @param metaPath Path to the .meta file.
+  /// @brief Read the hash value from the metadata file.
+  /// @param metaPath Path to the metadata file.
   /// @return Hash string.
   String readMetaHash(const String& metaPath);
 
-  /// @brief Read the recorded file size from the .meta file.
-  /// @param metaPath Path to the .meta file.
+  /// @brief Read the recorded file size from the metadata file.
+  /// @param metaPath Path to the metadata file.
   /// @return Size as a string, empty when the file predates size tracking.
   String readMetaSize(const String& metaPath);
 
-  /// @brief Read the original URL from the .meta file.
-  /// @param metaPath Path to the .meta file.
+  /// @brief Read the original URL from the metadata file.
+  /// @param metaPath Path to the metadata file.
   /// @return URL string.
   String readMetaURL(const String& metaPath);
 
-  /// @brief Write the .meta file with URL, last-modified, hash and file size.
-  /// @param metaPath Path to the .meta file.
+  /// @brief Write the metadata file with URL, last-modified, hash and file size.
+  /// @param metaPath Path to the metadata file.
   /// @param url Source URL.
   /// @param lastModified Last-modified string (epoch seconds).
   /// @param sha256 SHA256 hash string.
@@ -144,7 +154,7 @@ private:
                       const String& localPath, bool verbose);
 
   /// @brief Install a verified temp file next to a destination file.
-  ///        The .meta file is invalidated before the old file is moved aside, and the
+  ///        The metadata file is invalidated before the old file is moved aside, and the
   ///        previous file is restored if the install or its verification fails.
   /// @param localPath Destination path.
   /// @param tmpPath Verified temp file to install.
@@ -170,9 +180,11 @@ private:
   /// @return SHA256 hash string, or empty when the body could not be read reliably.
   String calculateStreamHash(WiFiClient& stream, size_t maxBytes, bool chunked);
 
-  /// @brief Ensure the directory for a given path exists.
+  /// @brief Ensure every directory level of a given path exists.
+  ///        LittleFS keeps real directories, so a nested path needs each level created in turn;
+  ///        SPIFFS treats directories as cosmetic and never needed this.
   /// @param path File path.
-  /// @return true if directory exists or was created, false otherwise.
+  /// @return true if the directory exists or was created, false otherwise.
   bool ensureDirExists(const String& path);
 
   /// @brief Check if a file exists.
@@ -185,8 +197,8 @@ private:
   /// @return Number of seconds.
   time_t parseMaxAge(const String& maxAgeStr);
 
-  /// @brief Parse the last-modified time from the .meta file.
-  /// @param metaPath Path to the .meta file.
+  /// @brief Parse the last-modified time from the metadata file.
+  /// @param metaPath Path to the metadata file.
   /// @return Time as epoch seconds.
   time_t parseMetaTime(const String& metaPath);
 
